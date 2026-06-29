@@ -1183,3 +1183,5 @@ public handler sxUnpad(in pData as Data, in pBlockSize as Integer) returns Data
    -- keep the first tUnpadded bytes of the input
    return sToData(tInPtr, tUnpadded)
 end handler
+
+end library

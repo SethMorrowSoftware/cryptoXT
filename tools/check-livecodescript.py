@@ -142,6 +142,12 @@ def classify_opener(tokens, is_script):
     first = tokens[0]
     if first == "foreign":
         return None                       # single-line foreign declaration
+    # The module-level declaration is itself a block: an LCB library/module/
+    # widget must be closed with `end library` / `end module` / `end widget`.
+    # Missing that terminator is a parse-to-EOF "syntax error" in OXT, so it is
+    # tracked here like any other block.
+    if first in ("library", "module", "widget"):
+        return first
     if first == "handler":
         return "handler"
     if first in ("public", "private") and len(tokens) > 1 and tokens[1] == "handler":
@@ -167,7 +173,7 @@ def check_balance(path, stripped_lines, is_script, problems):
             continue
         if tokens[0] == "end":
             what = tokens[1] if len(tokens) > 1 else ""
-            if what in ("if", "repeat", "unsafe"):
+            if what in ("if", "repeat", "unsafe", "library", "module", "widget"):
                 if not stack or stack[-1][0] != what:
                     top = stack[-1][0] if stack else "nothing"
                     problems.append(Problem(
