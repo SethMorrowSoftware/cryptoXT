@@ -42,7 +42,7 @@ extern "C" {
  * clear "reinstall the extension" error on skew, instead of corrupting memory
  * on first use against a mismatched native library.
  */
-#define SXT_ABI_VERSION 3
+#define SXT_ABI_VERSION 4
 
 /*
  * The largest single in-memory out-buffer we will service. The return value of
@@ -468,6 +468,41 @@ SXT_API int SXT_CALL sxt_kx_server_session_keys(unsigned char *rx_out, int rx_ca
 SXT_API int SXT_CALL sxt_pad(unsigned char *out, int cap,
                              const unsigned char *in, int inlen, int blocksize);
 SXT_API int SXT_CALL sxt_unpad(const unsigned char *in, int inlen, int blocksize);
+
+/* --- Phase 6: streaming / whole-file hashing + unbiased random ------------ */
+
+/*
+ * Uniform random integer in [0, upper_bound). Unbiased (rejection sampling),
+ * unlike `random() mod n`. upper_bound must be in [1, SXT_MAX_BUFFER]; the
+ * result is a non-negative int below the error band. The CSPRNG, so it is safe
+ * for shuffles, tokens, and nonces-as-indices (never use the engine random()).
+ */
+SXT_API int SXT_CALL sxt_randombytes_uniform(int upper_bound);
+
+/*
+ * BLAKE2b of a whole file, read chunk by chunk C-side: the bytes never enter a
+ * LiveCode Data (the hashing complement to sxt_encrypt_file). key is optional
+ * (keylen 0 = unkeyed); outlen is the digest length in [BYTES_MIN, BYTES_MAX].
+ * Returns outlen, -needed, SXT_ERR_IO (open/read), or BADARG. Path is UTF-8.
+ */
+SXT_API int SXT_CALL sxt_hash_file(const char *path, unsigned char *out, int cap, int outlen,
+                                   const unsigned char *key, int keylen);
+
+/*
+ * Multipart BLAKE2b for data the caller assembles incrementally. The state
+ * lives C-side in a generation-tagged handle table (separate from the
+ * secretstream table); script holds only the int handle, and a stale handle is
+ * a clean error, never a crash. init returns a positive handle (key optional,
+ * keylen 0 = unkeyed; outlen captured here is what final produces); update folds
+ * in more bytes; final writes the digest and RELEASES the handle (so the common
+ * init then update then final path self-cleans). Call sxt_hash_free to abort a
+ * state you will not finalize; free is idempotent. final reports -needed (state
+ * intact) if the buffer is smaller than the init-time outlen, so a retry is safe.
+ */
+SXT_API int SXT_CALL sxt_hash_init(const unsigned char *key, int keylen, int outlen);
+SXT_API int SXT_CALL sxt_hash_update(int handle, const unsigned char *in, int inlen);
+SXT_API int SXT_CALL sxt_hash_final(int handle, unsigned char *out, int cap);
+SXT_API void SXT_CALL sxt_hash_free(int handle);
 
 #ifdef __cplusplus
 }

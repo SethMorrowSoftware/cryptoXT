@@ -1883,3 +1883,267 @@ SXT_API int SXT_CALL sxt_unpad(const unsigned char *in, int inlen, int blocksize
     }
     return (int)unpadded_len;
 }
+
+/* ===========================================================================
+ * Phase 6: streaming / whole-file BLAKE2b, and an unbiased random integer.
+ *
+ * sxHash takes a whole Data; this adds the complement for data that should not
+ * be fully resident: a C-side file hash (the bytes never enter a Data, just
+ * like sxt_encrypt_file) and a multipart init/update/final the script can feed
+ * incrementally. randombytes_uniform is a small, safe convenience.
+ * =========================================================================== */
+
+/* Uniform random integer in [0, upper_bound). Unbiased (rejection sampling
+ * inside libsodium), unlike `random() mod n`. upper_bound is capped at
+ * SXT_MAX_BUFFER so the result is always a non-negative int below the error
+ * band. */
+SXT_API int SXT_CALL sxt_randombytes_uniform(int upper_bound)
+{
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (upper_bound < 1 || upper_bound > SXT_MAX_BUFFER) {
+        set_error("sxt_randombytes_uniform: upper_bound must be in [1, SXT_MAX_BUFFER]");
+        return SXT_ERR_BADARG;
+    }
+    return (int)randombytes_uniform((uint32_t)upper_bound);
+}
+
+/* ---------------------------------------------------------------------------
+ * Multipart hash handle table. SAME generation-tagged scheme as s_streams, but
+ * a SEPARATE table so the proven secretstream code is untouched. Hash handles
+ * set bit 15 of the low word (SXT_HASH_TAG); that puts their decoded "slot
+ * index" (>= 0x8000) out of the stream table's 0..63 range, so a hash handle
+ * accidentally passed to stream_lookup / sxt_free_stream is rejected as
+ * out-of-range with no change to that code, and a stream handle passed here is
+ * rejected because it lacks the tag. Handles stay positive and below the error
+ * band (max ~0x3FFF8020).
+ * --------------------------------------------------------------------------- */
+#define SXT_HASH_SLOTS 32
+#define SXT_HASH_TAG   0x8000
+
+typedef struct {
+    int in_use;
+    int gen;        /* current generation; starts at 1, bumped on free */
+    int outlen;     /* digest length captured at init, produced by final */
+    crypto_generichash_state state;
+} sxt_hash_slot;
+
+static sxt_hash_slot s_hashes[SXT_HASH_SLOTS];
+
+static int hash_make_handle(int idx, int gen)
+{
+    return ((gen & 0x3FFF) << 16) | SXT_HASH_TAG | ((idx + 1) & 0x7FFF);
+}
+
+static sxt_hash_slot *hash_lookup(int handle)
+{
+    int idx, gen;
+    if ((handle & SXT_HASH_TAG) == 0) {
+        return NULL;                 /* not a hash handle (e.g. a stream handle) */
+    }
+    idx = (handle & 0x7FFF) - 1;
+    gen = (handle >> 16) & 0x3FFF;
+    if (idx < 0 || idx >= SXT_HASH_SLOTS) {
+        return NULL;
+    }
+    if (!s_hashes[idx].in_use || s_hashes[idx].gen != gen) {
+        return NULL;                 /* stale or recycled handle */
+    }
+    return &s_hashes[idx];
+}
+
+static int hash_alloc(void)
+{
+    int i;
+    for (i = 0; i < SXT_HASH_SLOTS; i++) {
+        if (!s_hashes[i].in_use) {
+            if (s_hashes[i].gen <= 0) {
+                s_hashes[i].gen = 1;
+            }
+            s_hashes[i].in_use = 1;
+            return hash_make_handle(i, s_hashes[i].gen);
+        }
+    }
+    return 0;                        /* table full */
+}
+
+SXT_API void SXT_CALL sxt_hash_free(int handle)
+{
+    sxt_hash_slot *slot = hash_lookup(handle);
+    int idx;
+    if (slot == NULL) {
+        return;                      /* unknown / already-freed: idempotent no-op */
+    }
+    idx = (handle & 0x7FFF) - 1;
+    sodium_memzero(&s_hashes[idx].state, sizeof(s_hashes[idx].state));
+    s_hashes[idx].in_use = 0;
+    s_hashes[idx].outlen = 0;
+    s_hashes[idx].gen++;             /* invalidate every outstanding handle */
+    if (s_hashes[idx].gen > 0x3FFF) {
+        s_hashes[idx].gen = 1;       /* wrap, staying positive */
+    }
+}
+
+/* Validate an (optional) key + a digest length against BLAKE2b's bounds. */
+static int hash_check_params(const unsigned char *key, int keylen, int outlen,
+                             const char *who)
+{
+    if (outlen < (int)crypto_generichash_BYTES_MIN ||
+        outlen > (int)crypto_generichash_BYTES_MAX) {
+        set_error(who);              /* caller passes the specific message */
+        return SXT_ERR_BADARG;
+    }
+    if (keylen < 0 || keylen > (int)crypto_generichash_KEYBYTES_MAX) {
+        set_error(who);
+        return SXT_ERR_BADARG;
+    }
+    if (keylen > 0 && key == NULL) {
+        set_error(who);
+        return SXT_ERR_BADARG;
+    }
+    return SXT_OK;
+}
+
+SXT_API int SXT_CALL sxt_hash_init(const unsigned char *key, int keylen, int outlen)
+{
+    int handle;
+    sxt_hash_slot *slot;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (hash_check_params(key, keylen, outlen,
+                          "sxt_hash_init: bad key length or digest length") != SXT_OK) {
+        return SXT_ERR_BADARG;
+    }
+    handle = hash_alloc();
+    if (handle == 0) {
+        set_error("sxt_hash_init: too many open hash states");
+        return SXT_ERR_BADHANDLE;
+    }
+    slot = hash_lookup(handle);
+    if (slot == NULL ||
+        crypto_generichash_init(&slot->state, (keylen > 0 ? key : NULL),
+                                (size_t)keylen, (size_t)outlen) != 0) {
+        sxt_hash_free(handle);
+        set_error("sxt_hash_init: init failed");
+        return SXT_ERR_BADARG;
+    }
+    slot->outlen = outlen;
+    return handle;
+}
+
+SXT_API int SXT_CALL sxt_hash_update(int handle, const unsigned char *in, int inlen)
+{
+    sxt_hash_slot *slot;
+
+    clear_error();
+    if (inlen < 0) {
+        set_error("sxt_hash_update: negative length");
+        return SXT_ERR_BADARG;
+    }
+    slot = hash_lookup(handle);
+    if (slot == NULL) {
+        set_error("sxt_hash_update: bad or spent handle");
+        return SXT_ERR_BADHANDLE;
+    }
+    if (inlen > 0 && in == NULL) {
+        set_error("sxt_hash_update: null input");
+        return SXT_ERR_BADARG;
+    }
+    if (inlen > 0 &&
+        crypto_generichash_update(&slot->state, in, (unsigned long long)inlen) != 0) {
+        set_error("sxt_hash_update: update failed");
+        return SXT_ERR_BADARG;
+    }
+    return SXT_OK;
+}
+
+SXT_API int SXT_CALL sxt_hash_final(int handle, unsigned char *out, int cap)
+{
+    sxt_hash_slot *slot;
+    int outlen;
+
+    clear_error();
+    slot = hash_lookup(handle);
+    if (slot == NULL) {
+        set_error("sxt_hash_final: bad or spent handle");
+        return SXT_ERR_BADHANDLE;
+    }
+    outlen = slot->outlen;
+    /* Size check BEFORE the consuming final call: a short buffer is a -needed
+     * with the state still intact, so the caller can retry. */
+    if (cap < outlen) {
+        return -outlen;
+    }
+    if (out == NULL) {
+        set_error("sxt_hash_final: null output buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (crypto_generichash_final(&slot->state, out, (size_t)outlen) != 0) {
+        sxt_hash_free(handle);
+        set_error("sxt_hash_final: finalization failed");
+        return SXT_ERR_BADARG;
+    }
+    sxt_hash_free(handle);           /* state is consumed; release the slot */
+    return outlen;
+}
+
+SXT_API int SXT_CALL sxt_hash_file(const char *path, unsigned char *out, int cap, int outlen,
+                                   const unsigned char *key, int keylen)
+{
+    crypto_generichash_state st;
+    unsigned char buf[SXT_FILE_CHUNK];
+    FILE *f;
+    size_t rlen;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (hash_check_params(key, keylen, outlen,
+                          "sxt_hash_file: bad key length or digest length") != SXT_OK) {
+        return SXT_ERR_BADARG;
+    }
+    if (path == NULL) {
+        set_error("sxt_hash_file: null path");
+        return SXT_ERR_BADARG;
+    }
+    if (cap < outlen) {
+        return -outlen;              /* size query; nothing read or written */
+    }
+    if (out == NULL) {
+        set_error("sxt_hash_file: null output buffer");
+        return SXT_ERR_BADARG;
+    }
+    f = fopen(path, "rb");
+    if (f == NULL) {
+        set_error("sxt_hash_file: cannot open file");
+        return SXT_ERR_IO;
+    }
+    if (crypto_generichash_init(&st, (keylen > 0 ? key : NULL),
+                                (size_t)keylen, (size_t)outlen) != 0) {
+        fclose(f);
+        set_error("sxt_hash_file: init failed");
+        return SXT_ERR_BADARG;
+    }
+    do {
+        rlen = fread(buf, 1, sizeof(buf), f);
+        if (ferror(f)) {
+            fclose(f);
+            sodium_memzero(&st, sizeof(st));
+            set_error("sxt_hash_file: read error");
+            return SXT_ERR_IO;
+        }
+        if (rlen > 0) {
+            crypto_generichash_update(&st, buf, (unsigned long long)rlen);
+        }
+    } while (!feof(f));
+    fclose(f);
+    sodium_memzero(buf, sizeof(buf));
+    crypto_generichash_final(&st, out, (size_t)outlen);
+    return outlen;
+}

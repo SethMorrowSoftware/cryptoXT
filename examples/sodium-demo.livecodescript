@@ -243,6 +243,8 @@ on doHashing
    local tRound
    local tKey
    local tMac
+   local tH
+   local tStream
    sayHead "Hashing and encoding (BLAKE2b, hex, base64)"
    put u8("The quick brown fox jumps over the lazy dog") into tMsg
    put sxHash(tMsg, 32) into tDigest
@@ -255,6 +257,12 @@ on doHashing
    put sxHashKeyed(tMsg, tKey, 32) into tMac
    sayLn "Keyed BLAKE2b (a MAC):" && uHex(tMac)
    sayLn "  the keyed hash differs from the unkeyed one:" && (not sxMemEqual(tMac, tDigest))
+   put sxHashInit(32) into tH
+   sxHashUpdate tH, u8("The quick brown fox ")
+   sxHashUpdate tH, u8("jumps over the lazy dog")
+   put sxHashFinal(tH, 32) into tStream
+   sayLn "Multipart hash (fed in 2 chunks) equals the one-shot:" && sxMemEqual(tStream, tDigest)
+   sayLn "An unbiased dice roll (1-6) from the CSPRNG:" && (sxRandomUniform(6) + 1)
 end doHashing
 
 on doPasswords
@@ -428,6 +436,8 @@ on doFiles
       sxDecryptFile tEnc, tDec, tKey
       put (url ("binfile:" & tDec) is tData) into tOk
       sayLn "Encrypted then decrypted a 100 KB file; the round trip is byte-identical:" && tOk
+      sayLn "BLAKE2b of that file, hashed C-side (never loaded into a Data):"
+      sayLn "  " & textDecode(sxBin2Hex(sxHashFile(tSrc, 32)), "ascii")
    catch tErr
       sayLn "File demo skipped (could not use the temporary folder):" && tErr
    end try

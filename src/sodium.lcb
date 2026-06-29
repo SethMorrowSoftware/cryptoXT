@@ -53,7 +53,7 @@ metadata summary    is "Modern cryptography for xTalk via libsodium (authenticat
 --   kSXTABIVersion == SXT_ABI_VERSION ; kSXTErrBase == SXT_ERR_BASE.
 -- Declared before first use (OXT resolves a constant by lexical position; a
 -- forward reference silently evaluates to nothing).
-constant kSXTABIVersion is 3
+constant kSXTABIVersion is 4
 constant kSXTErrBase is -2000000000
 
 -- The engine MCStringEncoding enum value for UTF-8 (libfoundation: ASCII=0,
@@ -171,6 +171,15 @@ foreign handler _sxt_kx_server_session_keys(in pRx as Pointer, in pRxCap as CInt
 
 foreign handler _sxt_pad(in pOut as Pointer, in pCap as CInt, in pIn as Pointer, in pInLen as CInt, in pBlock as CInt) returns CInt binds to "c:sodiumxt>sxt_pad"
 foreign handler _sxt_unpad(in pIn as Pointer, in pInLen as CInt, in pBlock as CInt) returns CInt binds to "c:sodiumxt>sxt_unpad"
+
+-- Phase 6: streaming / whole-file hashing + unbiased random. pKey is optional
+-- Pointer so the unkeyed forms can pass `nothing` as a C NULL (see _sxt_generichash).
+foreign handler _sxt_randombytes_uniform(in pUpper as CInt) returns CInt binds to "c:sodiumxt>sxt_randombytes_uniform"
+foreign handler _sxt_hash_file(in pPath as ZStringUTF8, in pOut as Pointer, in pCap as CInt, in pOutLen as CInt, in pKey as optional Pointer, in pKeyLen as CInt) returns CInt binds to "c:sodiumxt>sxt_hash_file"
+foreign handler _sxt_hash_init(in pKey as optional Pointer, in pKeyLen as CInt, in pOutLen as CInt) returns CInt binds to "c:sodiumxt>sxt_hash_init"
+foreign handler _sxt_hash_update(in pHandle as CInt, in pIn as Pointer, in pInLen as CInt) returns CInt binds to "c:sodiumxt>sxt_hash_update"
+foreign handler _sxt_hash_final(in pHandle as CInt, in pOut as Pointer, in pCap as CInt) returns CInt binds to "c:sodiumxt>sxt_hash_final"
+foreign handler _sxt_hash_free(in pHandle as CInt) returns nothing binds to "c:sodiumxt>sxt_hash_free"
 
 -- --------------------------------------------------------------------------
 -- Private helpers. Each wraps its foreign call(s) in `unsafe`, so the public
@@ -1266,6 +1275,123 @@ public handler sxUnpad(in pData as Data, in pBlockSize as Integer) returns Data
    end if
    -- keep the first tUnpadded bytes of the input
    return sToData(tInPtr, tUnpadded)
+end handler
+
+-- ==========================================================================
+-- Streaming / whole-file hashing + unbiased random (Phase 6).
+-- ==========================================================================
+
+-- Unbiased random integer in [0, pUpperBound) from the CSPRNG (no modulo skew;
+-- never use the engine random() for anything unguessable).
+public handler sxRandomUniform(in pUpperBound as Integer) returns Integer
+   variable tR as Integer
+   sPrepare()
+   if pUpperBound < 1 then
+      throw "sxRandomUniform: upper bound must be 1 or greater."
+   end if
+   unsafe
+      put _sxt_randombytes_uniform(pUpperBound) into tR
+   end unsafe
+   if tR < 0 then
+      throw "sxRandomUniform:" && sLastError()
+   end if
+   return tR
+end handler
+
+-- BLAKE2b of a whole file, read chunk-by-chunk C-side (the bytes never enter a
+-- Data, so a multi-gigabyte file hashes without blowing up memory; the hashing
+-- complement to sxEncryptFile). pOutLen is the digest length (32 is typical).
+public handler sxHashFile(in pPath as String, in pOutLen as Integer) returns Data
+   variable tOut as Pointer
+   variable tWritten as Integer
+   sPrepare()
+   put sAlloc(pOutLen + 1) into tOut
+   unsafe
+      put _sxt_hash_file(pPath, tOut, pOutLen + 1, pOutLen, nothing, 0) into tWritten
+   end unsafe
+   return sFinish("sxHashFile", tOut, tWritten)
+end handler
+
+-- Keyed file hash (a file MAC / domain-separated checksum).
+public handler sxHashFileKeyed(in pPath as String, in pKey as Data, in pOutLen as Integer) returns Data
+   variable tOut as Pointer
+   variable tKeyPtr as Pointer
+   variable tKeyLen as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pKey) into tKeyLen
+   put sDataPtr(pKey) into tKeyPtr
+   put sAlloc(pOutLen + 1) into tOut
+   unsafe
+      put _sxt_hash_file(pPath, tOut, pOutLen + 1, pOutLen, tKeyPtr, tKeyLen) into tWritten
+   end unsafe
+   return sFinish("sxHashFileKeyed", tOut, tWritten)
+end handler
+
+-- Multipart BLAKE2b for data assembled incrementally. Open a state with
+-- sxHashInit (returns a handle), feed chunks with sxHashUpdate, then sxHashFinal
+-- (which writes the digest AND releases the handle). Pass the SAME pOutLen to
+-- final as to init. If you abandon a state without finalizing, call sxFreeHash.
+public handler sxHashInit(in pOutLen as Integer) returns Integer
+   variable tHandle as Integer
+   sPrepare()
+   unsafe
+      put _sxt_hash_init(nothing, 0, pOutLen) into tHandle
+   end unsafe
+   if tHandle < 0 then
+      throw "sxHashInit:" && sLastError()
+   end if
+   return tHandle
+end handler
+
+public handler sxHashInitKeyed(in pKey as Data, in pOutLen as Integer) returns Integer
+   variable tKeyPtr as Pointer
+   variable tKeyLen as Integer
+   variable tHandle as Integer
+   sPrepare()
+   put sDataLen(pKey) into tKeyLen
+   put sDataPtr(pKey) into tKeyPtr
+   unsafe
+      put _sxt_hash_init(tKeyPtr, tKeyLen, pOutLen) into tHandle
+   end unsafe
+   if tHandle < 0 then
+      throw "sxHashInitKeyed:" && sLastError()
+   end if
+   return tHandle
+end handler
+
+public handler sxHashUpdate(in pHandle as Integer, in pData as Data) returns nothing
+   variable tInPtr as Pointer
+   variable tInLen as Integer
+   variable tRc as Integer
+   sPrepare()
+   put sDataLen(pData) into tInLen
+   put sDataPtr(pData) into tInPtr
+   unsafe
+      put _sxt_hash_update(pHandle, tInPtr, tInLen) into tRc
+   end unsafe
+   if tRc is not 0 then
+      throw "sxHashUpdate:" && sLastError()
+   end if
+end handler
+
+public handler sxHashFinal(in pHandle as Integer, in pOutLen as Integer) returns Data
+   variable tOut as Pointer
+   variable tWritten as Integer
+   sPrepare()
+   put sAlloc(pOutLen + 1) into tOut
+   unsafe
+      put _sxt_hash_final(pHandle, tOut, pOutLen + 1) into tWritten
+   end unsafe
+   return sFinish("sxHashFinal", tOut, tWritten)
+end handler
+
+-- Free a hash state opened with sxHashInit that you will not finalize
+-- (idempotent; sxHashFinal already frees on success).
+public handler sxFreeHash(in pHandle as Integer) returns nothing
+   unsafe
+      _sxt_hash_free(pHandle)
+   end unsafe
 end handler
 
 end library
