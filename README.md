@@ -6,26 +6,37 @@ streaming AEAD for large files, X25519 boxes, ed25519 signatures, BLAKE2b hashin
 CSPRNG) to xTalk, behind a flat C ABI with an LCB layer on top, the same shape as its sibling
 extension TorrentXT.
 
-## Status: Phase 0 (the FFI buffer round-trip)
+## Status: Phases 0-5 of the C shim are implemented and verified
 
-Phase 0 of `docs/SodiumXT-IMPLEMENTATION-PLAN.md` is in place: the build, the test harness,
-the tooling, and exactly two end-to-end entry points (`sxVersion`, `sxRandomBytes`) that prove
-a `Data` makes the script -> Pointer -> C -> Pointer -> `Data` trip intact. Everything else
-(hashing, secretbox, Argon2id, secretstream, box, sign) is downstream of that and is not built
-yet, on purpose.
+The full libsodium surface from `docs/SodiumXT-IMPLEMENTATION-PLAN.md` is wrapped in the C
+shim and exercised by the test suite:
+
+- **Phase 0** - the FFI buffer round trip (`sxVersion`, `sxRandomBytes`), the proof a `Data`
+  survives script -> Pointer -> C -> Pointer -> `Data` intact.
+- **Phase 1** - BLAKE2b hashing, hex/base64 encode-decode, constant-time compare.
+- **Phase 2** - secretbox + AEAD (prepend random nonce), Argon2id (`pwhash` / `pwhash_str`).
+- **Phase 3** - streaming AEAD (secretstream) with a handle table, and C-side
+  `sxEncryptFile` / `sxDecryptFile` (the bytes never enter a `Data`; truncation is detected).
+- **Phase 4** - X25519 boxes + sealed boxes, ed25519 sign / verify (random or seeded).
+- **Phase 5** - key derivation (`kdf`), key exchange (`kx`), and padding.
 
 ```
-src/sodium_shim.{c,h}   C shim, ABI sxt_*  ->  sodiumxt.{so,dll,dylib}  (one shared lib)
-src/sodium.lcb          LCB binding, public sx*  (verified statically; needs an OXT pass)
-tests/sodium_smoke_test.c   KATs + the out-buffer round trip + the firewall negative paths
+src/sodium_shim.{c,h}   C shim, ABI sxt_* (90 symbols)  ->  sodiumxt.{so,dll,dylib}
+src/sodium.lcb          LCB binding, public sx* (47 handlers; static-checked, needs an OXT pass)
+tests/sodium_smoke_test.c   125 checks: KATs + round trips + tamper/truncation + the firewall
 CMakeLists.txt          acquires a pinned libsodium (1.0.20) and static-links it
 tools/                  check-livecodescript.py (static gate) + package-extension.py
 ```
 
-Verified here: the C shim builds warning-clean and the smoke test passes under gcc ASan +
-UBSan, the CMake build produces a `sodiumxt` shared library exporting ONLY the `sxt_*` surface,
-and the static checker is green. The `.lcb` layer is verified statically only (OXT has no
-headless compiler); see `src/sodium.lcb` for what still needs an on-engine pass.
+Verified in this environment: the C shim builds warning-clean (`-Werror`) and all **125**
+checks pass under **gcc ASan + UBSan**, with known-answer tests pinned against published /
+RFC vectors (BLAKE2b, Argon2id, ed25519) and tamper / wrong-key / truncation tests proving
+the authentication actually fails closed. The CMake build produces a `sodiumxt` shared library
+exporting **only** the `sxt_*` surface, and the static checker is green.
+
+The **`.lcb` layer is verified statically only** - OXT has no headless compiler here, so its
+engine-specific foreign declarations need reconciling against TorrentXT's proven bindings on a
+real OXT compile. See the banner at the top of `src/sodium.lcb`.
 
 ## What is here
 
