@@ -142,3 +142,50 @@ jobs:
           name: sodiumxt-all-platforms
           path: src/code/**
           if-no-files-found: error
+
+  # Commit the freshly built binaries back into src/code/<arch>-<platform>/ so a
+  # clone has a working extension on EVERY platform (not just whatever was built
+  # and committed by hand). Runs only on main: it lays the per-platform artifacts
+  # into the tree and commits them with [skip ci], which GitHub honours so the
+  # commit does NOT retrigger this workflow (no loop). A normal merge to main thus
+  # produces one follow-up binary-refresh commit.
+  #
+  # Requires the workflow token to be able to push to main: this needs
+  # `contents: write` (below) AND, if main is a protected branch, an allowance for
+  # GitHub Actions to push to it (or this job will fail at `git push`).
+  commit-binaries:
+    name: commit native binaries to main
+    needs: native
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+          pattern: sodiumxt-*
+      - name: Lay binaries into src/code/<arch>-<platform>/
+        run: |
+          for d in staged/sodiumxt-*; do
+            id="$(basename "$d" | sed 's/^sodiumxt-//')"
+            [ "$id" = "all-platforms" ] && continue   # the combined bundle, not a platform
+            mkdir -p "src/code/$id"
+            cp "$d"/* "src/code/$id/"
+          done
+          echo "Native libraries staged into src/code:"
+          find src/code -type f | sort
+      - name: Commit refreshed binaries (loop-guarded with [skip ci])
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- src/code; then
+            echo "Binaries unchanged; nothing to commit."
+            exit 0
+          fi
+          git add src/code
+          git commit -m "ci: refresh bundled native binaries for all platforms [skip ci]"
+          git push origin HEAD:main
