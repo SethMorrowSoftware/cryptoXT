@@ -42,7 +42,7 @@ extern "C" {
  * clear "reinstall the extension" error on skew, instead of corrupting memory
  * on first use against a mismatched native library.
  */
-#define SXT_ABI_VERSION 2
+#define SXT_ABI_VERSION 3
 
 /*
  * The largest single in-memory out-buffer we will service. The return value of
@@ -93,22 +93,36 @@ extern "C" {
  */
 SXT_API int SXT_CALL sxt_init(void);
 
-/* The SodiumXT extension version (a static string literal; safe to return). */
-SXT_API const char *SXT_CALL sxt_version(void);
+/*
+ * String-returning entry points ALL fill a caller buffer; none returns a
+ * `const char *`. This is a hard ABI rule, not a style choice: when the LCB
+ * layer bridges a foreign RETURN of ZStringUTF8 / NativeCString / WString, the
+ * engine ADOPTS the returned pointer and later calls free() on it (every
+ * bridged-C-string foreign type registers free() as its finalizer). Returning
+ * a static literal or a library-owned string is therefore free()-on-static:
+ * heap corruption on the very first call. So these mirror sxt_bin2hex exactly:
+ * the caller passes an out buffer (an MCMemoryAllocate block) plus its
+ * capacity, and we return the string length WITHOUT the trailing NUL, or
+ * -needed (negative required capacity, NUL included) if the buffer is too
+ * small. The engine owns and frees that block; we never hand it our memory.
+ */
 
-/* The linked libsodium version (sodium_version_string(), a static literal). */
-SXT_API const char *SXT_CALL sxt_sodium_version(void);
+/* The SodiumXT extension version ("0.1.0"); writes it into out, returns length. */
+SXT_API int SXT_CALL sxt_version(char *out, int cap);
+
+/* The linked libsodium version (sodium_version_string()); fills out, returns length. */
+SXT_API int SXT_CALL sxt_sodium_version(char *out, int cap);
 
 /* The ABI version compiled into this library (== SXT_ABI_VERSION). */
 SXT_API int SXT_CALL sxt_abi_version(void);
 
 /*
- * The last error message on this thread, or "" when clean. NEVER returns NULL
- * (handing NULL back where script expects a string is its own crash). The
- * pointer is into thread-local storage with process lifetime; the engine
- * copies it immediately.
+ * The last error message on this thread (the empty string when clean) copied
+ * into out; returns its length (0 when clean) or -needed. A pure read: it never
+ * mutates the thread-local error buffer, so reporting an error cannot clobber
+ * the very message being reported.
  */
-SXT_API const char *SXT_CALL sxt_last_error(void);
+SXT_API int SXT_CALL sxt_last_error(char *out, int cap);
 
 /*
  * Fill out[0..n) with n cryptographically secure random bytes (randombytes_buf,
@@ -239,9 +253,11 @@ SXT_API int SXT_CALL sxt_pwhash_strbytes(void);
 SXT_API int SXT_CALL sxt_pwhash_opslimit_interactive(void);
 SXT_API int SXT_CALL sxt_pwhash_opslimit_moderate(void);
 SXT_API int SXT_CALL sxt_pwhash_opslimit_sensitive(void);
-SXT_API const char *SXT_CALL sxt_pwhash_memlimit_interactive(void);
-SXT_API const char *SXT_CALL sxt_pwhash_memlimit_moderate(void);
-SXT_API const char *SXT_CALL sxt_pwhash_memlimit_sensitive(void);
+/* memlimit presets as decimal strings, filled into a caller buffer (see the
+ * string-return rule above): each returns the string length, or -needed. */
+SXT_API int SXT_CALL sxt_pwhash_memlimit_interactive(char *out, int cap);
+SXT_API int SXT_CALL sxt_pwhash_memlimit_moderate(char *out, int cap);
+SXT_API int SXT_CALL sxt_pwhash_memlimit_sensitive(char *out, int cap);
 
 /*
  * Derive an outlen-byte key from a passphrase and salt (salt must be saltbytes;

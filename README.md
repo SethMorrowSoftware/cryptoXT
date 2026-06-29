@@ -23,12 +23,12 @@ shim and exercised by the test suite:
 ```
 src/sodium_shim.{c,h}   C shim, ABI sxt_* (90 symbols)  ->  sodiumxt.{so,dll,dylib}
 src/sodium.lcb          LCB binding, public sx* (47 handlers; static-checked, needs an OXT pass)
-tests/sodium_smoke_test.c   125 checks: KATs + round trips + tamper/truncation + the firewall
+tests/sodium_smoke_test.c   126 checks: KATs + round trips + tamper/truncation + the firewall
 CMakeLists.txt          acquires a pinned libsodium (1.0.20) and static-links it
 tools/                  check-livecodescript.py (static gate) + package-extension.py
 ```
 
-Verified in this environment: the C shim builds warning-clean (`-Werror`) and all **125**
+Verified in this environment: the C shim builds warning-clean (`-Werror`) and all **126**
 checks pass under **gcc ASan + UBSan**, with known-answer tests pinned against published /
 RFC vectors (BLAKE2b, Argon2id, ed25519) and tamper / wrong-key / truncation tests proving
 the authentication actually fails closed. The CMake build produces a `sodiumxt` shared library

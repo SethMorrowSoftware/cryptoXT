@@ -7,23 +7,35 @@
 -- key derivation, key exchange, and padding.
 --
 -- ==========================================================================
--- ON-ENGINE PASS, ROUND 1. This file is being reconciled against a real OXT
--- compile. Resolved so far:
+-- ON-ENGINE PASS, ROUND 2. Reconciled against a real OXT compile + a crash
+-- audit (the harness crashed OXT on Linux x64 on its first FFI calls).
+-- Resolved:
 --   * the module needs `end library` (an LCB library is a bracketed block);
---   * the foreign types (Pointer/CInt/CUInt/CBool/ZStringUTF8) come from
---     `use com.livecode.foreign`; the operators `&`/`&&`/`is`/`is not` from
---     `use com.livecode.string`; arithmetic `+`/`-`/`*`/`<` from
+--   * the foreign types (Pointer/CInt/CUInt/CBool/UIntSize/ZStringUTF8) come
+--     from `use com.livecode.foreign`; the operators `&`/`&&`/`is`/`is not`
+--     from `use com.livecode.string`; arithmetic `+`/`-`/`*`/`<` from
 --     `use com.livecode.arithmetic`;
 --   * the in-buffer accessor is MCDataGetBytePtr (not ...Byptr);
---   * textEncode/textDecode are NOT available to an LCB module, so text <-> Data
---     conversion is kept OUT of this layer: byte values cross as Data, and text
---     values that the C side takes as a C string cross as String (the engine
---     bridges String -> UTF-8 at a ZStringUTF8 parameter). Hex/base64 and the
---     pwhash_str output are therefore returned as Data (ASCII bytes); the caller
---     can textDecode in livecodescript if a String is wanted.
--- Still unconfirmed until the next compile: the exact <builtin> integer WIDTHS
--- (size_t vs CUInt), CBool-in-conditional behaviour, and out-parameter call
--- syntax. The native C layer it binds to IS fully tested (KATs + ASan/UBSan).
+--   * textEncode/textDecode are NOT available to an LCB module, so byte values
+--     cross as Data; a String is built from filled bytes with
+--     MCStringCreateWithBytes (the engine's own idiom). Hex/base64 and the
+--     pwhash_str output are returned as Data (ASCII bytes); the caller can
+--     textDecode in livecodescript if a String is wanted.
+-- TWO CRASH BUGS FOUND AND FIXED in this round (both verified against the
+-- LiveCode engine source; ABI bumped 2 -> 3):
+--   1. MCMemoryAllocate's size is C `size_t`, so it must marshal as UIntSize,
+--      NOT CUInt. CUInt passed a 4-byte size where the callee reads 8 bytes on
+--      64-bit, so the allocation size was garbage and the first buffer fill
+--      corrupted the heap. (Hit by sxRandomBytes, the harness's 2nd call.)
+--   2. A foreign handler that RETURNS a bridged C string (ZStringUTF8 etc.)
+--      makes the engine adopt and free() the returned pointer; the shim's
+--      version/error/memlimit returns were static storage, so the engine
+--      free()d static memory. (Hit by sxVersion, the harness's 1st call.)
+--      Fixed by filling a caller buffer and returning length/-needed, like the
+--      byte-buffer calls; the shim no longer returns any const char*.
+-- Still wants an OXT pass: out-parameter call syntax for the keypair / kx /
+-- secretstream-pull handlers. The native C layer is fully tested (KATs +
+-- ASan/UBSan, 126 checks).
 -- ==========================================================================
 
 library org.openxtalk.library.sodium
@@ -41,8 +53,14 @@ metadata summary    is "Modern cryptography for xTalk via libsodium (authenticat
 --   kSXTABIVersion == SXT_ABI_VERSION ; kSXTErrBase == SXT_ERR_BASE.
 -- Declared before first use (OXT resolves a constant by lexical position; a
 -- forward reference silently evaluates to nothing).
-constant kSXTABIVersion is 2
+constant kSXTABIVersion is 3
 constant kSXTErrBase is -2000000000
+
+-- The engine MCStringEncoding enum value for UTF-8 (libfoundation: ASCII=0,
+-- Windows1252=1, MacRoman=2, ISO8859_1=3, UTF8=4, ...). Used when building a
+-- String from bytes the shim filled (see sToString). Our shim strings are ASCII
+-- (a UTF-8 subset), so this round-trips them exactly.
+constant kMCStringEncodingUTF8 is 4
 
 -- --------------------------------------------------------------------------
 -- Engine memory + Data bridges (resolve by NAME, so NO leading underscore).
@@ -50,21 +68,37 @@ constant kSXTErrBase is -2000000000
 -- from MCMemoryAllocate passed as a Pointer, an in buffer is MCDataGetBytePtr +
 -- MCDataGetLength, and written bytes are copied back with MCDataCreateWithBytes.
 -- --------------------------------------------------------------------------
-foreign handler MCMemoryAllocate(in pSize as CUInt, out rPtr as Pointer) returns CBool binds to "<builtin>"
+-- MCMemoryAllocate's size is C `size_t`, so it MUST marshal as UIntSize (the
+-- LCB size type). Declaring it CUInt passes a 4-byte int where the callee reads
+-- an 8-byte size_t on a 64-bit build: the high word is garbage, the allocation
+-- size is wrong, and the first sxRandomBytes/hash/etc. corrupts memory. UIntSize
+-- is what the proven htmltidy and TorrentXT bindings use here.
+foreign handler MCMemoryAllocate(in pSize as UIntSize, out rPtr as Pointer) returns CBool binds to "<builtin>"
 foreign handler MCMemoryDeallocate(in pPtr as Pointer) returns nothing binds to "<builtin>"
 foreign handler MCDataGetBytePtr(in pData as Data) returns Pointer binds to "<builtin>"
 foreign handler MCDataGetLength(in pData as Data) returns CUInt binds to "<builtin>"
 foreign handler MCDataCreateWithBytes(in pBytes as Pointer, in pLen as CUInt, out rData as Data) returns CBool binds to "<builtin>"
+-- Build a String from bytes the shim filled (used by the string-returning calls
+-- below). pEncoding is kMCStringEncodingUTF8; pIsExternalRep is false. This is
+-- the engine's own bytes -> String idiom (libscript module-foreign UTF8 import).
+foreign handler MCStringCreateWithBytes(in pBytes as Pointer, in pByteCount as CUInt, in pEncoding as CUInt, in pIsExternalRep as CBool, out rString as String) returns CBool binds to "<builtin>"
 
 -- --------------------------------------------------------------------------
 -- The SodiumXT C ABI. Private _sxt_* names; the bind strings reference the
 -- stable exported symbols by name.
 -- --------------------------------------------------------------------------
+-- The string-returning entry points FILL a caller buffer and return the length
+-- (or -needed); they do NOT return a C string. A foreign handler that returns a
+-- bridged C string (ZStringUTF8 / NativeCString / WString) makes the engine
+-- ADOPT and later free() the returned pointer, so returning the shim's static
+-- version/error/memlimit strings would be free()-on-static: heap corruption on
+-- the very first call (this is what crashed the harness at sxVersion). So these
+-- mirror the byte-buffer calls: out Pointer + capacity in, length/-needed out.
 foreign handler _sxt_init() returns CInt binds to "c:sodiumxt>sxt_init"
-foreign handler _sxt_version() returns ZStringUTF8 binds to "c:sodiumxt>sxt_version"
-foreign handler _sxt_sodium_version() returns ZStringUTF8 binds to "c:sodiumxt>sxt_sodium_version"
+foreign handler _sxt_version(in pOut as Pointer, in pCap as CInt) returns CInt binds to "c:sodiumxt>sxt_version"
+foreign handler _sxt_sodium_version(in pOut as Pointer, in pCap as CInt) returns CInt binds to "c:sodiumxt>sxt_sodium_version"
 foreign handler _sxt_abi_version() returns CInt binds to "c:sodiumxt>sxt_abi_version"
-foreign handler _sxt_last_error() returns ZStringUTF8 binds to "c:sodiumxt>sxt_last_error"
+foreign handler _sxt_last_error(in pOut as Pointer, in pCap as CInt) returns CInt binds to "c:sodiumxt>sxt_last_error"
 foreign handler _sxt_randombytes(in pOut as Pointer, in pCap as CInt, in pCount as CInt) returns CInt binds to "c:sodiumxt>sxt_randombytes"
 
 foreign handler _sxt_generichash(in pOut as Pointer, in pCap as CInt, in pOutLen as CInt, in pIn as Pointer, in pInLen as CInt, in pKey as Pointer, in pKeyLen as CInt) returns CInt binds to "c:sodiumxt>sxt_generichash"
@@ -88,9 +122,9 @@ foreign handler _sxt_pwhash_strbytes() returns CInt binds to "c:sodiumxt>sxt_pwh
 foreign handler _sxt_pwhash_opslimit_interactive() returns CInt binds to "c:sodiumxt>sxt_pwhash_opslimit_interactive"
 foreign handler _sxt_pwhash_opslimit_moderate() returns CInt binds to "c:sodiumxt>sxt_pwhash_opslimit_moderate"
 foreign handler _sxt_pwhash_opslimit_sensitive() returns CInt binds to "c:sodiumxt>sxt_pwhash_opslimit_sensitive"
-foreign handler _sxt_pwhash_memlimit_interactive() returns ZStringUTF8 binds to "c:sodiumxt>sxt_pwhash_memlimit_interactive"
-foreign handler _sxt_pwhash_memlimit_moderate() returns ZStringUTF8 binds to "c:sodiumxt>sxt_pwhash_memlimit_moderate"
-foreign handler _sxt_pwhash_memlimit_sensitive() returns ZStringUTF8 binds to "c:sodiumxt>sxt_pwhash_memlimit_sensitive"
+foreign handler _sxt_pwhash_memlimit_interactive(in pOut as Pointer, in pCap as CInt) returns CInt binds to "c:sodiumxt>sxt_pwhash_memlimit_interactive"
+foreign handler _sxt_pwhash_memlimit_moderate(in pOut as Pointer, in pCap as CInt) returns CInt binds to "c:sodiumxt>sxt_pwhash_memlimit_moderate"
+foreign handler _sxt_pwhash_memlimit_sensitive(in pOut as Pointer, in pCap as CInt) returns CInt binds to "c:sodiumxt>sxt_pwhash_memlimit_sensitive"
 foreign handler _sxt_kdf_derive(in pOut as Pointer, in pCap as CInt, in pSubLen as CInt, in pId as ZStringUTF8, in pCtx as Pointer, in pCtxLen as CInt, in pMaster as Pointer, in pMasterLen as CInt) returns CInt binds to "c:sodiumxt>sxt_kdf_derive"
 
 foreign handler _sxt_secretstream_headerbytes() returns CInt binds to "c:sodiumxt>sxt_secretstream_headerbytes"
@@ -161,14 +195,6 @@ private handler sPrepare() returns nothing
    end if
 end handler
 
-private handler sLastError() returns String
-   variable tMsg as String
-   unsafe
-      put _sxt_last_error() into tMsg
-   end unsafe
-   return tMsg
-end handler
-
 private handler sAlloc(in pCap as Integer) returns Pointer
    variable tPtr as Pointer
    variable tOk as CBool
@@ -215,6 +241,41 @@ private handler sToData(in pPtr as Pointer, in pLen as Integer) returns Data
    return tResult
 end handler
 
+-- Build a String from pLen bytes the shim wrote into pPtr (the engine's own
+-- UTF-8 bytes -> String idiom). Used by the string-returning calls; NEVER let
+-- the shim return a C string directly (the engine would free() our static).
+private handler sToString(in pPtr as Pointer, in pLen as Integer) returns String
+   variable tResult as String
+   variable tOk as CBool
+   unsafe
+      put MCStringCreateWithBytes(pPtr, pLen, kMCStringEncodingUTF8, false, tResult) into tOk
+   end unsafe
+   if not tOk then
+      throw "SodiumXT: could not build result string."
+   end if
+   return tResult
+end handler
+
+-- The last native error on this thread, as a String (empty when clean). It is
+-- the error REPORTER, so it never throws: a failure here returns "" rather than
+-- masking the original error. 512 comfortably exceeds the shim's 256-byte buffer.
+private handler sLastError() returns String
+   variable tPtr as Pointer
+   variable tWritten as Integer
+   variable tResult as String
+   put sAlloc(512) into tPtr
+   unsafe
+      put _sxt_last_error(tPtr, 512) into tWritten
+   end unsafe
+   if tWritten < 0 then
+      sFree(tPtr)
+      return ""
+   end if
+   put sToString(tPtr, tWritten) into tResult
+   sFree(tPtr)
+   return tResult
+end handler
+
 -- Common tail for a buffer-filling call: a negative result is either a -needed
 -- (our allocation was somehow short) or a hard error; either way we free and
 -- surface the native message. On success we copy exactly the written bytes.
@@ -229,6 +290,18 @@ private handler sFinish(in pName as String, in pPtr as Pointer, in pWritten as I
    return tResult
 end handler
 
+-- Like sFinish, but the filled bytes are a String (version / error / memlimit).
+private handler sFinishString(in pName as String, in pPtr as Pointer, in pWritten as Integer) returns String
+   variable tResult as String
+   if pWritten < 0 then
+      sFree(pPtr)
+      throw pName & ":" && sLastError()
+   end if
+   put sToString(pPtr, pWritten) into tResult
+   sFree(pPtr)
+   return tResult
+end handler
+
 -- ==========================================================================
 -- Util / init.
 -- ==========================================================================
@@ -238,13 +311,23 @@ public handler sxInit() returns nothing
 end handler
 
 public handler sxVersion() returns String
+   variable tPv as Pointer
+   variable tSv as Pointer
+   variable tPvLen as Integer
+   variable tSvLen as Integer
    variable tProductVer as String
    variable tSodiumVer as String
    sPrepare()
+   put sAlloc(64) into tPv
    unsafe
-      put _sxt_version() into tProductVer
-      put _sxt_sodium_version() into tSodiumVer
+      put _sxt_version(tPv, 64) into tPvLen
    end unsafe
+   put sFinishString("sxVersion", tPv, tPvLen) into tProductVer
+   put sAlloc(64) into tSv
+   unsafe
+      put _sxt_sodium_version(tSv, 64) into tSvLen
+   end unsafe
+   put sFinishString("sxVersion", tSv, tSvLen) into tSodiumVer
    return "SodiumXT" && tProductVer && "(libsodium" && tSodiumVer & ")"
 end handler
 
@@ -410,30 +493,36 @@ end handler
 -- sxPwHashStr. The opslimit preset is a tiny decimal you pass as a String
 -- literal: "2" (interactive), "3" (moderate), "4" (sensitive).
 public handler sxPwMemInteractive() returns String
-   variable tMem as String
+   variable tPtr as Pointer
+   variable tWritten as Integer
    sPrepare()
+   put sAlloc(32) into tPtr
    unsafe
-      put _sxt_pwhash_memlimit_interactive() into tMem
+      put _sxt_pwhash_memlimit_interactive(tPtr, 32) into tWritten
    end unsafe
-   return tMem
+   return sFinishString("sxPwMemInteractive", tPtr, tWritten)
 end handler
 
 public handler sxPwMemModerate() returns String
-   variable tMem as String
+   variable tPtr as Pointer
+   variable tWritten as Integer
    sPrepare()
+   put sAlloc(32) into tPtr
    unsafe
-      put _sxt_pwhash_memlimit_moderate() into tMem
+      put _sxt_pwhash_memlimit_moderate(tPtr, 32) into tWritten
    end unsafe
-   return tMem
+   return sFinishString("sxPwMemModerate", tPtr, tWritten)
 end handler
 
 public handler sxPwMemSensitive() returns String
-   variable tMem as String
+   variable tPtr as Pointer
+   variable tWritten as Integer
    sPrepare()
+   put sAlloc(32) into tPtr
    unsafe
-      put _sxt_pwhash_memlimit_sensitive() into tMem
+      put _sxt_pwhash_memlimit_sensitive(tPtr, 32) into tWritten
    end unsafe
-   return tMem
+   return sFinishString("sxPwMemSensitive", tPtr, tWritten)
 end handler
 
 -- Derive a pKeyLen-byte key from a passphrase + salt (store the salt and the

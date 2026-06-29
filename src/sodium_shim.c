@@ -86,21 +86,55 @@ SXT_API int SXT_CALL sxt_init(void)
     return ensure_init();
 }
 
-SXT_API const char *SXT_CALL sxt_version(void)
+/*
+ * Copy a NUL-terminated C string into the caller's out buffer using the same
+ * overloaded-return contract as the byte-buffer fills:
+ *   - cap too small           -> -(len+1)        (-needed, includes the NUL)
+ *   - out == NULL (with room)  -> SXT_ERR_BADARG
+ *   - otherwise               -> write len bytes + NUL, return len.
+ *
+ * Why this exists: a C string must NEVER cross the FFI as a foreign RETURN
+ * value. The LCB engine ADOPTS a returned ZStringUTF8 / NativeCString / WString
+ * pointer and later calls free() on it (every bridged-C-string foreign type
+ * registers free() as its finalizer in the engine), so returning a static
+ * literal or a library-owned string is free()-on-static: heap corruption on the
+ * first call. Instead the caller hands us an MCMemoryAllocate block and we fill
+ * it, exactly like sxt_bin2hex; the engine owns and frees that block. This
+ * helper is deliberately mechanical (it never touches s_last_error) so
+ * sxt_last_error can reuse it without clobbering the message it is reporting.
+ */
+static int fill_string(char *out, int cap, const char *src)
 {
-    /* Static string literal: program lifetime, so it is safe to return and the
-     * engine copies it immediately. */
-    return "0.1.0";
+    size_t len = (src != NULL) ? strlen(src) : 0;
+    if (len >= (size_t)SXT_MAX_BUFFER) {
+        return SXT_ERR_BADARG;          /* unreachable for our tiny strings */
+    }
+    if (cap < (int)len + 1) {
+        return -((int)len + 1);
+    }
+    if (out == NULL) {
+        return SXT_ERR_BADARG;
+    }
+    if (len > 0) {
+        memcpy(out, src, len);
+    }
+    out[len] = '\0';
+    return (int)len;
 }
 
-SXT_API const char *SXT_CALL sxt_sodium_version(void)
+SXT_API int SXT_CALL sxt_version(char *out, int cap)
 {
-    /* sodium_version_string() returns a static literal too. Guard on init only
-     * so we never return NULL; on failure return "" (never NULL). */
+    return fill_string(out, cap, "0.1.0");
+}
+
+SXT_API int SXT_CALL sxt_sodium_version(char *out, int cap)
+{
+    /* Guard on init only so we never query libsodium before it is ready; on a
+     * failed init report the empty string rather than an error code. */
     if (ensure_init() != SXT_OK) {
-        return "";
+        return fill_string(out, cap, "");
     }
-    return sodium_version_string();
+    return fill_string(out, cap, sodium_version_string());
 }
 
 SXT_API int SXT_CALL sxt_abi_version(void)
@@ -108,9 +142,11 @@ SXT_API int SXT_CALL sxt_abi_version(void)
     return SXT_ABI_VERSION;
 }
 
-SXT_API const char *SXT_CALL sxt_last_error(void)
+SXT_API int SXT_CALL sxt_last_error(char *out, int cap)
 {
-    return s_last_error[0] != '\0' ? s_last_error : "";
+    /* s_last_error is the empty string when clean, so this naturally returns 0
+     * (length) for a clean call. A pure read: fill_string never mutates it. */
+    return fill_string(out, cap, s_last_error);
 }
 
 SXT_API int SXT_CALL sxt_randombytes(unsigned char *out, int cap, int n)
@@ -614,25 +650,27 @@ SXT_API int SXT_CALL sxt_pwhash_opslimit_sensitive(void)
 { return (int)crypto_pwhash_OPSLIMIT_SENSITIVE; }
 
 /* memlimit presets as decimal strings (SENSITIVE is 1 GiB now and could grow
- * past 2^31 in a future libsodium). Each has its own static buffer so the three
- * results never alias; the LCB layer copies the ZStringUTF8 on return anyway. */
-SXT_API const char *SXT_CALL sxt_pwhash_memlimit_interactive(void)
+ * past 2^31 in a future libsodium), filled into the caller's buffer. We format
+ * into a local scratch buffer and copy out via fill_string: never return a
+ * pointer to it (a returned C string would be free()d by the engine; see
+ * fill_string). */
+SXT_API int SXT_CALL sxt_pwhash_memlimit_interactive(char *out, int cap)
 {
-    static char buf[24];
+    char buf[24];
     snprintf(buf, sizeof(buf), "%llu", (unsigned long long)crypto_pwhash_MEMLIMIT_INTERACTIVE);
-    return buf;
+    return fill_string(out, cap, buf);
 }
-SXT_API const char *SXT_CALL sxt_pwhash_memlimit_moderate(void)
+SXT_API int SXT_CALL sxt_pwhash_memlimit_moderate(char *out, int cap)
 {
-    static char buf[24];
+    char buf[24];
     snprintf(buf, sizeof(buf), "%llu", (unsigned long long)crypto_pwhash_MEMLIMIT_MODERATE);
-    return buf;
+    return fill_string(out, cap, buf);
 }
-SXT_API const char *SXT_CALL sxt_pwhash_memlimit_sensitive(void)
+SXT_API int SXT_CALL sxt_pwhash_memlimit_sensitive(char *out, int cap)
 {
-    static char buf[24];
+    char buf[24];
     snprintf(buf, sizeof(buf), "%llu", (unsigned long long)crypto_pwhash_MEMLIMIT_SENSITIVE);
-    return buf;
+    return fill_string(out, cap, buf);
 }
 
 /* Parse a decimal unsigned 64-bit value; 0 on success, -1 on any malformation

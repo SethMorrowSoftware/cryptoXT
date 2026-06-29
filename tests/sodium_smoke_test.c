@@ -60,10 +60,22 @@ static int all_equal(const unsigned char *p, int n, unsigned char v)
     return 1;
 }
 
+/* sxt_last_error now FILLS a caller buffer (it never returns a const char*, so
+ * the engine never free()s our static storage). This convenience returns the
+ * current error length (0 == clean) so the "is/isn't clean" checks read the
+ * same as before. */
+static int last_error_len(void)
+{
+    char buf[256];
+    int n = sxt_last_error(buf, (int)sizeof(buf));
+    return n < 0 ? -n : n;
+}
+
 static void test_init_and_versions(void)
 {
-    const char *ver;
-    const char *sodver;
+    char ver[64];
+    char sodver[64];
+    int n;
 
     printf("init + versions:\n");
 
@@ -72,25 +84,31 @@ static void test_init_and_versions(void)
 
     CHECK(sxt_abi_version() == SXT_ABI_VERSION, "abi_version matches the header");
 
-    ver = sxt_version();
-    CHECK(ver != NULL && ver[0] != '\0', "extension version is a non-empty string");
-    CHECK(strcmp(ver, "0.1.0") == 0, "extension version is the expected 0.1.0");
+    /* The string entry points fill a caller buffer and return the length (never
+     * a const char*; the engine would free() a returned C string). */
+    n = sxt_version(ver, (int)sizeof(ver));
+    CHECK(n > 0, "extension version writes a non-empty string");
+    CHECK(n == 5 && strcmp(ver, "0.1.0") == 0, "extension version is the expected 0.1.0");
 
-    sodver = sxt_sodium_version();
-    CHECK(sodver != NULL, "sodium_version is never NULL");
+    /* -needed contract: a too-small buffer reports the required size, writes
+     * nothing, and a buffer of exactly that size then succeeds. */
+    CHECK(sxt_version(ver, 3) == -6, "version into a short buffer returns -(len+1)");
+
+    n = sxt_sodium_version(sodver, (int)sizeof(sodver));
+    CHECK(n > 0, "sodium_version writes a non-empty string");
     /* The source build (Linux/macOS) links exactly the pinned SXT_PINNED_SODIUM;
      * the Windows CI links libsodium from vcpkg, which may be a different 1.0.x
      * patch release. The whole 1.0.x line shares the same API and length
      * constants, and the functional KATs below (BLAKE2b, Argon2id, ed25519, kdf)
      * are the real guard against any drift, so here we assert only the stable
      * 1.0.x line and print the actual version for visibility. */
-    CHECK(sodver != NULL && strncmp(sodver, "1.0.", 4) == 0,
+    CHECK(n > 0 && strncmp(sodver, "1.0.", 4) == 0,
           "linked libsodium is on the stable 1.0.x line");
     printf("       (linked libsodium %s; pinned source build is %s)\n",
-           (sodver != NULL ? sodver : "(null)"), SXT_PINNED_SODIUM);
+           (n > 0 ? sodver : "(null)"), SXT_PINNED_SODIUM);
 
     /* A clean call leaves no error text behind. */
-    CHECK(sxt_last_error()[0] == '\0', "last_error is empty after a clean call");
+    CHECK(last_error_len() == 0, "last_error is empty after a clean call");
 }
 
 static void test_randombytes_firewall(void)
@@ -102,7 +120,7 @@ static void test_randombytes_firewall(void)
     /* Negative count: a hard error in the error band, with a message. */
     CHECK(sxt_randombytes(buf, (int)sizeof(buf), -1) == SXT_ERR_BADARG,
           "negative count -> SXT_ERR_BADARG");
-    CHECK(sxt_last_error()[0] != '\0', "an error sets last_error text");
+    CHECK(last_error_len() != 0, "an error sets last_error text");
 
     /* Oversize count: rejected before it could collide with the error band. */
     CHECK(sxt_randombytes(buf, (int)sizeof(buf), SXT_MAX_BUFFER) == SXT_ERR_BADARG,
@@ -141,7 +159,7 @@ static void test_randombytes_fills_and_has_entropy(void)
      * the buffer was not actually (re)filled. */
     CHECK(memcmp(a, b, sizeof(a)) != 0, "two draws differ (entropy is flowing)");
 
-    CHECK(sxt_last_error()[0] == '\0', "last_error cleared by the successful call");
+    CHECK(last_error_len() == 0, "last_error cleared by the successful call");
 }
 
 /*
