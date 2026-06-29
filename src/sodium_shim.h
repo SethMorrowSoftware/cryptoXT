@@ -182,6 +182,95 @@ SXT_API int SXT_CALL sxt_base642bin(unsigned char *out, int cap,
 SXT_API int SXT_CALL sxt_memequal(const unsigned char *a, int alen,
                                   const unsigned char *b, int blen);
 
+/* --- Phase 2: secret-key authenticated encryption + Argon2id -------------- */
+
+/* secretbox (XSalsa20-Poly1305) length constants. */
+SXT_API int SXT_CALL sxt_secretbox_keybytes(void);
+SXT_API int SXT_CALL sxt_secretbox_noncebytes(void);
+SXT_API int SXT_CALL sxt_secretbox_macbytes(void);
+
+/*
+ * Encrypt msg under key. Output is nonce || ciphertext || MAC: the shim draws a
+ * fresh random nonce and PREPENDS it, so the caller never handles a nonce
+ * (CLAUDE.md rule 3, the misuse-resistant shape). Output length is
+ * noncebytes + msglen + macbytes. key must be exactly keybytes.
+ */
+SXT_API int SXT_CALL sxt_secretbox(unsigned char *out, int cap,
+                                   const unsigned char *msg, int msglen,
+                                   const unsigned char *key, int keylen);
+/*
+ * Open a box produced by sxt_secretbox. Plaintext length is
+ * boxlen - noncebytes - macbytes. Returns SXT_ERR_AUTH (not garbage) on a wrong
+ * key or any tampering: the Poly1305 tag is verified before a byte is trusted.
+ */
+SXT_API int SXT_CALL sxt_secretbox_open(unsigned char *out, int cap,
+                                        const unsigned char *box, int boxlen,
+                                        const unsigned char *key, int keylen);
+
+/* AEAD (XChaCha20-Poly1305 IETF) length constants. */
+SXT_API int SXT_CALL sxt_aead_keybytes(void);
+SXT_API int SXT_CALL sxt_aead_noncebytes(void);
+SXT_API int SXT_CALL sxt_aead_abytes(void);
+
+/*
+ * Like secretbox, but additionally authenticates associated data (ad) without
+ * encrypting it (e.g. a header bound to the ciphertext). Same prepend-random-
+ * nonce discipline. ad may be NULL with adlen 0. Decrypt returns SXT_ERR_AUTH if
+ * the ciphertext OR the supplied ad does not match what was sealed.
+ */
+SXT_API int SXT_CALL sxt_aead_encrypt(unsigned char *out, int cap,
+                                      const unsigned char *msg, int msglen,
+                                      const unsigned char *ad, int adlen,
+                                      const unsigned char *key, int keylen);
+SXT_API int SXT_CALL sxt_aead_decrypt(unsigned char *out, int cap,
+                                      const unsigned char *box, int boxlen,
+                                      const unsigned char *ad, int adlen,
+                                      const unsigned char *key, int keylen);
+
+/*
+ * Argon2id (crypto_pwhash) constants and presets. opslimit/memlimit cross into
+ * sxt_pwhash / sxt_pwhash_str as DECIMAL STRINGS, because a memlimit can exceed
+ * 2^31 and there is no 64-bit foreign int. The opslimit presets fit in an int;
+ * the memlimit presets are returned as decimal strings to match how they go in.
+ */
+SXT_API int SXT_CALL sxt_pwhash_saltbytes(void);
+SXT_API int SXT_CALL sxt_pwhash_bytes_min(void);
+SXT_API int SXT_CALL sxt_pwhash_strbytes(void);
+SXT_API int SXT_CALL sxt_pwhash_opslimit_interactive(void);
+SXT_API int SXT_CALL sxt_pwhash_opslimit_moderate(void);
+SXT_API int SXT_CALL sxt_pwhash_opslimit_sensitive(void);
+SXT_API const char *SXT_CALL sxt_pwhash_memlimit_interactive(void);
+SXT_API const char *SXT_CALL sxt_pwhash_memlimit_moderate(void);
+SXT_API const char *SXT_CALL sxt_pwhash_memlimit_sensitive(void);
+
+/*
+ * Derive an outlen-byte key from a passphrase and salt (salt must be saltbytes;
+ * generate it with sxt_randombytes and store it alongside the ciphertext).
+ * opslimit/memlimit are decimal strings, parsed and range-checked in the shim.
+ * Argon2id, the only sanctioned password KDF. Returns outlen / -needed / error.
+ */
+SXT_API int SXT_CALL sxt_pwhash(unsigned char *out, int cap, int outlen,
+                                const unsigned char *pass, int passlen,
+                                const unsigned char *salt, int saltlen,
+                                const char *opslimit, const char *memlimit);
+
+/*
+ * Hash a passphrase into a self-describing string (crypto_pwhash_str, which
+ * packs the salt and the opslimit/memlimit into its output) for storage.
+ * Returns the string length excluding the NUL, -needed, or an error.
+ */
+SXT_API int SXT_CALL sxt_pwhash_str(char *out, int cap,
+                                    const unsigned char *pass, int passlen,
+                                    const char *opslimit, const char *memlimit);
+/*
+ * Verify a passphrase against a stored sxt_pwhash_str string (constant time
+ * within libsodium). Returns 1 (match), 0 (no match or malformed string). A
+ * non-match is a legitimate answer, not an error, so this never enters the
+ * error band; compare it with `is`, never the secret itself.
+ */
+SXT_API int SXT_CALL sxt_pwhash_str_verify(const char *hashstr,
+                                           const unsigned char *pass, int passlen);
+
 #ifdef __cplusplus
 }
 #endif

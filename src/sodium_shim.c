@@ -15,6 +15,9 @@
 #include "sodium_shim.h"
 
 #include <sodium.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #if defined(_MSC_VER)
@@ -386,4 +389,389 @@ SXT_API int SXT_CALL sxt_memequal(const unsigned char *a, int alen,
         return 0;
     }
     return sodium_memcmp(a, b, (size_t)alen) == 0 ? 1 : 0;
+}
+
+/* ========================================================================== *
+ * Phase 2: secret-key authenticated encryption + Argon2id.
+ * ========================================================================== */
+
+SXT_API int SXT_CALL sxt_secretbox_keybytes(void)   { return (int)crypto_secretbox_KEYBYTES; }
+SXT_API int SXT_CALL sxt_secretbox_noncebytes(void) { return (int)crypto_secretbox_NONCEBYTES; }
+SXT_API int SXT_CALL sxt_secretbox_macbytes(void)   { return (int)crypto_secretbox_MACBYTES; }
+
+SXT_API int SXT_CALL sxt_secretbox(unsigned char *out, int cap,
+                                   const unsigned char *msg, int msglen,
+                                   const unsigned char *key, int keylen)
+{
+    const int noncebytes = (int)crypto_secretbox_NONCEBYTES;
+    const int macbytes = (int)crypto_secretbox_MACBYTES;
+    int needed;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (msglen < 0) {
+        set_error("sxt_secretbox: negative length");
+        return SXT_ERR_BADARG;
+    }
+    if (keylen != (int)crypto_secretbox_KEYBYTES) {
+        set_error("sxt_secretbox: wrong key length");
+        return SXT_ERR_BADARG;
+    }
+    /* Guard the framed length against int overflow before we negate it. */
+    if (msglen > SXT_MAX_BUFFER - noncebytes - macbytes) {
+        set_error("sxt_secretbox: message too large for a single buffer");
+        return SXT_ERR_BADARG;
+    }
+    needed = noncebytes + msglen + macbytes;
+    if (cap < needed) {
+        return -needed;
+    }
+    if (out == NULL || key == NULL) {
+        set_error("sxt_secretbox: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (msglen > 0 && msg == NULL) {
+        set_error("sxt_secretbox: null message");
+        return SXT_ERR_BADARG;
+    }
+    /* Fresh random nonce, written into the first noncebytes of out, then the
+     * ciphertext+MAC after it. The nonce is public; the key never moves. */
+    randombytes_buf(out, (size_t)noncebytes);
+    if (crypto_secretbox_easy(out + noncebytes, msg, (unsigned long long)msglen,
+                              out, key) != 0) {
+        set_error("sxt_secretbox: encryption failed");
+        return SXT_ERR_BADARG;
+    }
+    return needed;
+}
+
+SXT_API int SXT_CALL sxt_secretbox_open(unsigned char *out, int cap,
+                                        const unsigned char *box, int boxlen,
+                                        const unsigned char *key, int keylen)
+{
+    const int noncebytes = (int)crypto_secretbox_NONCEBYTES;
+    const int macbytes = (int)crypto_secretbox_MACBYTES;
+    int plainlen;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (keylen != (int)crypto_secretbox_KEYBYTES) {
+        set_error("sxt_secretbox_open: wrong key length");
+        return SXT_ERR_BADARG;
+    }
+    if (boxlen < noncebytes + macbytes) {
+        set_error("sxt_secretbox_open: ciphertext too short");
+        return SXT_ERR_BADARG;
+    }
+    plainlen = boxlen - noncebytes - macbytes;
+    if (cap < plainlen) {
+        return -plainlen;
+    }
+    if (box == NULL || key == NULL) {
+        set_error("sxt_secretbox_open: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (plainlen > 0 && out == NULL) {
+        set_error("sxt_secretbox_open: null output buffer");
+        return SXT_ERR_BADARG;
+    }
+    /* The leading noncebytes are the nonce; verify+decrypt the rest. A bad tag
+     * (wrong key or tampering) is reported as SXT_ERR_AUTH, never as garbage. */
+    if (crypto_secretbox_open_easy(out, box + noncebytes,
+                                   (unsigned long long)(boxlen - noncebytes),
+                                   box, key) != 0) {
+        set_error("sxt_secretbox_open: wrong key or tampered data");
+        return SXT_ERR_AUTH;
+    }
+    return plainlen;
+}
+
+SXT_API int SXT_CALL sxt_aead_keybytes(void)
+{ return (int)crypto_aead_xchacha20poly1305_ietf_KEYBYTES; }
+SXT_API int SXT_CALL sxt_aead_noncebytes(void)
+{ return (int)crypto_aead_xchacha20poly1305_ietf_NPUBBYTES; }
+SXT_API int SXT_CALL sxt_aead_abytes(void)
+{ return (int)crypto_aead_xchacha20poly1305_ietf_ABYTES; }
+
+SXT_API int SXT_CALL sxt_aead_encrypt(unsigned char *out, int cap,
+                                      const unsigned char *msg, int msglen,
+                                      const unsigned char *ad, int adlen,
+                                      const unsigned char *key, int keylen)
+{
+    const int npub = (int)crypto_aead_xchacha20poly1305_ietf_NPUBBYTES;
+    const int abytes = (int)crypto_aead_xchacha20poly1305_ietf_ABYTES;
+    int needed;
+    unsigned long long clen = 0;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (msglen < 0 || adlen < 0) {
+        set_error("sxt_aead_encrypt: negative length");
+        return SXT_ERR_BADARG;
+    }
+    if (keylen != (int)crypto_aead_xchacha20poly1305_ietf_KEYBYTES) {
+        set_error("sxt_aead_encrypt: wrong key length");
+        return SXT_ERR_BADARG;
+    }
+    if (msglen > SXT_MAX_BUFFER - npub - abytes) {
+        set_error("sxt_aead_encrypt: message too large for a single buffer");
+        return SXT_ERR_BADARG;
+    }
+    needed = npub + msglen + abytes;
+    if (cap < needed) {
+        return -needed;
+    }
+    if (out == NULL || key == NULL) {
+        set_error("sxt_aead_encrypt: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (msglen > 0 && msg == NULL) {
+        set_error("sxt_aead_encrypt: null message");
+        return SXT_ERR_BADARG;
+    }
+    if (adlen > 0 && ad == NULL) {
+        set_error("sxt_aead_encrypt: null associated data");
+        return SXT_ERR_BADARG;
+    }
+    randombytes_buf(out, (size_t)npub);
+    if (crypto_aead_xchacha20poly1305_ietf_encrypt(
+            out + npub, &clen, msg, (unsigned long long)msglen,
+            ad, (unsigned long long)adlen, NULL, out, key) != 0) {
+        set_error("sxt_aead_encrypt: encryption failed");
+        return SXT_ERR_BADARG;
+    }
+    return npub + (int)clen;
+}
+
+SXT_API int SXT_CALL sxt_aead_decrypt(unsigned char *out, int cap,
+                                      const unsigned char *box, int boxlen,
+                                      const unsigned char *ad, int adlen,
+                                      const unsigned char *key, int keylen)
+{
+    const int npub = (int)crypto_aead_xchacha20poly1305_ietf_NPUBBYTES;
+    const int abytes = (int)crypto_aead_xchacha20poly1305_ietf_ABYTES;
+    int plainlen;
+    unsigned long long mlen = 0;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (adlen < 0) {
+        set_error("sxt_aead_decrypt: negative length");
+        return SXT_ERR_BADARG;
+    }
+    if (keylen != (int)crypto_aead_xchacha20poly1305_ietf_KEYBYTES) {
+        set_error("sxt_aead_decrypt: wrong key length");
+        return SXT_ERR_BADARG;
+    }
+    if (boxlen < npub + abytes) {
+        set_error("sxt_aead_decrypt: ciphertext too short");
+        return SXT_ERR_BADARG;
+    }
+    plainlen = boxlen - npub - abytes;
+    if (cap < plainlen) {
+        return -plainlen;
+    }
+    if (box == NULL || key == NULL) {
+        set_error("sxt_aead_decrypt: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (plainlen > 0 && out == NULL) {
+        set_error("sxt_aead_decrypt: null output buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (adlen > 0 && ad == NULL) {
+        set_error("sxt_aead_decrypt: null associated data");
+        return SXT_ERR_BADARG;
+    }
+    if (crypto_aead_xchacha20poly1305_ietf_decrypt(
+            out, &mlen, NULL, box + npub, (unsigned long long)(boxlen - npub),
+            ad, (unsigned long long)adlen, box, key) != 0) {
+        set_error("sxt_aead_decrypt: wrong key, wrong associated data, or tampered");
+        return SXT_ERR_AUTH;
+    }
+    return (int)mlen;
+}
+
+/* ---- Argon2id (crypto_pwhash) ------------------------------------------- */
+
+SXT_API int SXT_CALL sxt_pwhash_saltbytes(void) { return (int)crypto_pwhash_SALTBYTES; }
+SXT_API int SXT_CALL sxt_pwhash_bytes_min(void) { return (int)crypto_pwhash_BYTES_MIN; }
+SXT_API int SXT_CALL sxt_pwhash_strbytes(void)  { return (int)crypto_pwhash_STRBYTES; }
+
+SXT_API int SXT_CALL sxt_pwhash_opslimit_interactive(void)
+{ return (int)crypto_pwhash_OPSLIMIT_INTERACTIVE; }
+SXT_API int SXT_CALL sxt_pwhash_opslimit_moderate(void)
+{ return (int)crypto_pwhash_OPSLIMIT_MODERATE; }
+SXT_API int SXT_CALL sxt_pwhash_opslimit_sensitive(void)
+{ return (int)crypto_pwhash_OPSLIMIT_SENSITIVE; }
+
+/* memlimit presets as decimal strings (SENSITIVE is 1 GiB now and could grow
+ * past 2^31 in a future libsodium). Each has its own static buffer so the three
+ * results never alias; the LCB layer copies the ZStringUTF8 on return anyway. */
+SXT_API const char *SXT_CALL sxt_pwhash_memlimit_interactive(void)
+{
+    static char buf[24];
+    snprintf(buf, sizeof(buf), "%llu", (unsigned long long)crypto_pwhash_MEMLIMIT_INTERACTIVE);
+    return buf;
+}
+SXT_API const char *SXT_CALL sxt_pwhash_memlimit_moderate(void)
+{
+    static char buf[24];
+    snprintf(buf, sizeof(buf), "%llu", (unsigned long long)crypto_pwhash_MEMLIMIT_MODERATE);
+    return buf;
+}
+SXT_API const char *SXT_CALL sxt_pwhash_memlimit_sensitive(void)
+{
+    static char buf[24];
+    snprintf(buf, sizeof(buf), "%llu", (unsigned long long)crypto_pwhash_MEMLIMIT_SENSITIVE);
+    return buf;
+}
+
+/* Parse a decimal unsigned 64-bit value; 0 on success, -1 on any malformation
+ * (empty, non-digit, overflow). 64-bit limits cross the FFI as strings because
+ * there is no 64-bit foreign int (CLAUDE.md). */
+static int parse_u64(const char *s, unsigned long long *out)
+{
+    char *end = NULL;
+    unsigned long long v;
+    if (s == NULL || *s == '\0') {
+        return -1;
+    }
+    errno = 0;
+    v = strtoull(s, &end, 10);
+    if (errno != 0 || end == s || *end != '\0') {
+        return -1;
+    }
+    *out = v;
+    return 0;
+}
+
+/* Parse + range-check opslimit/memlimit against libsodium's own bounds. */
+static int parse_limits(const char *opslimit, const char *memlimit,
+                        unsigned long long *ops, unsigned long long *mem)
+{
+    if (parse_u64(opslimit, ops) != 0 || parse_u64(memlimit, mem) != 0) {
+        set_error("pwhash: opslimit/memlimit not a valid decimal number");
+        return -1;
+    }
+    if (*ops < crypto_pwhash_OPSLIMIT_MIN || *ops > crypto_pwhash_OPSLIMIT_MAX) {
+        set_error("pwhash: opslimit out of range");
+        return -1;
+    }
+    if (*mem < crypto_pwhash_MEMLIMIT_MIN || *mem > crypto_pwhash_MEMLIMIT_MAX) {
+        set_error("pwhash: memlimit out of range");
+        return -1;
+    }
+    return 0;
+}
+
+SXT_API int SXT_CALL sxt_pwhash(unsigned char *out, int cap, int outlen,
+                                const unsigned char *pass, int passlen,
+                                const unsigned char *salt, int saltlen,
+                                const char *opslimit, const char *memlimit)
+{
+    unsigned long long ops = 0;
+    unsigned long long mem = 0;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (passlen < 0) {
+        set_error("sxt_pwhash: negative passphrase length");
+        return SXT_ERR_BADARG;
+    }
+    if (outlen < (int)crypto_pwhash_BYTES_MIN || outlen >= SXT_MAX_BUFFER) {
+        set_error("sxt_pwhash: derived key length out of range");
+        return SXT_ERR_BADARG;
+    }
+    if (saltlen != (int)crypto_pwhash_SALTBYTES) {
+        set_error("sxt_pwhash: wrong salt length");
+        return SXT_ERR_BADARG;
+    }
+    if (parse_limits(opslimit, memlimit, &ops, &mem) != 0) {
+        return SXT_ERR_BADARG;
+    }
+    if (cap < outlen) {
+        return -outlen;
+    }
+    if (out == NULL || salt == NULL) {
+        set_error("sxt_pwhash: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (passlen > 0 && pass == NULL) {
+        set_error("sxt_pwhash: null passphrase");
+        return SXT_ERR_BADARG;
+    }
+    /* Argon2id: the only sanctioned password KDF. A non-zero return is almost
+     * always "could not allocate memlimit bytes"; surface it, do not crash. */
+    if (crypto_pwhash(out, (unsigned long long)outlen,
+                      (const char *)pass, (unsigned long long)passlen,
+                      salt, ops, (size_t)mem, crypto_pwhash_ALG_ARGON2ID13) != 0) {
+        set_error("sxt_pwhash: derivation failed (out of memory for memlimit?)");
+        return SXT_ERR_BADARG;
+    }
+    return outlen;
+}
+
+SXT_API int SXT_CALL sxt_pwhash_str(char *out, int cap,
+                                    const unsigned char *pass, int passlen,
+                                    const char *opslimit, const char *memlimit)
+{
+    unsigned long long ops = 0;
+    unsigned long long mem = 0;
+    const int needed = (int)crypto_pwhash_STRBYTES;   /* includes the NUL */
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (passlen < 0) {
+        set_error("sxt_pwhash_str: negative passphrase length");
+        return SXT_ERR_BADARG;
+    }
+    if (parse_limits(opslimit, memlimit, &ops, &mem) != 0) {
+        return SXT_ERR_BADARG;
+    }
+    if (cap < needed) {
+        return -needed;
+    }
+    if (out == NULL) {
+        set_error("sxt_pwhash_str: null output buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (passlen > 0 && pass == NULL) {
+        set_error("sxt_pwhash_str: null passphrase");
+        return SXT_ERR_BADARG;
+    }
+    if (crypto_pwhash_str(out, (const char *)pass, (unsigned long long)passlen,
+                          ops, (size_t)mem) != 0) {
+        set_error("sxt_pwhash_str: hashing failed (out of memory for memlimit?)");
+        return SXT_ERR_BADARG;
+    }
+    return (int)strlen(out);
+}
+
+SXT_API int SXT_CALL sxt_pwhash_str_verify(const char *hashstr,
+                                           const unsigned char *pass, int passlen)
+{
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return 0;
+    }
+    if (hashstr == NULL || passlen < 0 || (passlen > 0 && pass == NULL)) {
+        return 0;
+    }
+    /* A non-match (or a malformed stored string) is a legitimate 0, not an error
+     * in the band: "wrong password" is an answer the caller acts on. */
+    return crypto_pwhash_str_verify(hashstr, (const char *)pass,
+                                    (unsigned long long)passlen) == 0 ? 1 : 0;
 }

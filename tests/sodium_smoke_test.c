@@ -17,6 +17,7 @@
  */
 #include "sodium_shim.h"
 
+#include <sodium.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -297,6 +298,129 @@ static void test_memequal(void)
     CHECK(sxt_memequal(NULL, 0, NULL, 0) == 1, "two empty buffers -> 1");
 }
 
+/* ========================================================================== *
+ * Phase 2: secretbox + AEAD + Argon2id.
+ * ========================================================================== */
+
+static void test_secretbox(void)
+{
+    const unsigned char msg[5] = {'h', 'e', 'l', 'l', 'o'};
+    unsigned char key[32];
+    unsigned char wrong[32];
+    unsigned char box[24 + 5 + 16];
+    unsigned char plain[8];
+    unsigned char manual[8];
+    int boxlen;
+    int r;
+
+    printf("secretbox (round trip, framing, auth):\n");
+    memset(key, 0x11, sizeof(key));
+    memset(wrong, 0x22, sizeof(wrong));
+
+    boxlen = sxt_secretbox(box, (int)sizeof(box), msg, 5, key, 32);
+    CHECK(boxlen == 24 + 5 + 16, "secretbox output is nonce + msg + mac");
+
+    r = sxt_secretbox_open(plain, (int)sizeof(plain), box, boxlen, key, 32);
+    CHECK(r == 5 && memcmp(plain, msg, 5) == 0, "round trip recovers the plaintext");
+
+    /* Framing cross-check: the leading 24 bytes ARE the nonce, so libsodium's
+     * raw open of box[24:] under that nonce must recover the same plaintext. */
+    CHECK(crypto_secretbox_open_easy(manual, box + 24,
+                                     (unsigned long long)(boxlen - 24),
+                                     box, key) == 0 &&
+          memcmp(manual, msg, 5) == 0,
+          "framing is exactly nonce||ciphertext (raw libsodium agrees)");
+
+    box[24] ^= 0x01;
+    CHECK(sxt_secretbox_open(plain, (int)sizeof(plain), box, boxlen, key, 32) == SXT_ERR_AUTH,
+          "a tampered ciphertext byte -> SXT_ERR_AUTH");
+    box[24] ^= 0x01;
+
+    CHECK(sxt_secretbox_open(plain, (int)sizeof(plain), box, boxlen, wrong, 32) == SXT_ERR_AUTH,
+          "a wrong key -> SXT_ERR_AUTH");
+
+    CHECK(sxt_secretbox(box, (int)sizeof(box), msg, 5, key, 16) == SXT_ERR_BADARG,
+          "wrong key length -> BADARG");
+    CHECK(sxt_secretbox_open(plain, (int)sizeof(plain), box, 10, key, 32) == SXT_ERR_BADARG,
+          "too-short ciphertext -> BADARG");
+}
+
+static void test_aead(void)
+{
+    const unsigned char msg[4] = {'d', 'a', 't', 'a'};
+    const unsigned char ad[3] = {'h', 'd', 'r'};
+    const unsigned char ad2[3] = {'h', 'd', 'x'};
+    unsigned char key[32];
+    unsigned char box[24 + 4 + 16];
+    unsigned char plain[8];
+    int boxlen;
+    int r;
+
+    printf("aead xchacha20poly1305 (AD binding + auth):\n");
+    memset(key, 0x33, sizeof(key));
+
+    boxlen = sxt_aead_encrypt(box, (int)sizeof(box), msg, 4, ad, 3, key, 32);
+    CHECK(boxlen == 24 + 4 + 16, "aead output is nonce + msg + tag");
+
+    r = sxt_aead_decrypt(plain, (int)sizeof(plain), box, boxlen, ad, 3, key, 32);
+    CHECK(r == 4 && memcmp(plain, msg, 4) == 0, "round trip with AD recovers plaintext");
+
+    CHECK(sxt_aead_decrypt(plain, (int)sizeof(plain), box, boxlen, ad2, 3, key, 32) == SXT_ERR_AUTH,
+          "wrong associated data -> SXT_ERR_AUTH");
+
+    box[24] ^= 0x80;
+    CHECK(sxt_aead_decrypt(plain, (int)sizeof(plain), box, boxlen, ad, 3, key, 32) == SXT_ERR_AUTH,
+          "tampered ciphertext -> SXT_ERR_AUTH");
+    box[24] ^= 0x80;
+
+    boxlen = sxt_aead_encrypt(box, (int)sizeof(box), msg, 4, NULL, 0, key, 32);
+    r = sxt_aead_decrypt(plain, (int)sizeof(plain), box, boxlen, NULL, 0, key, 32);
+    CHECK(r == 4 && memcmp(plain, msg, 4) == 0, "round trip with empty AD");
+}
+
+static void test_pwhash(void)
+{
+    const char *pinned =
+        "$argon2id$v=19$m=1024,t=2,p=1$ETM71WSPez+kmgsM2ZIpqw"
+        "$Pk8d58NRCAf201AQ7VFpsU7ru+EkpOQi8Ju8PzQCxZI";
+    unsigned char salt[16];
+    unsigned char key[32];
+    char hashstr[128];
+    char hex[2 * 32 + 1];
+    int r;
+
+    printf("Argon2id (KAT + pwhash_str verify):\n");
+    memset(salt, 'A', sizeof(salt));
+
+    /* Deterministic Argon2id KAT (fixed salt + ops=2 + mem=1 MiB). */
+    r = sxt_pwhash(key, 32, 32, (const unsigned char *)"password", 8, salt, 16,
+                   "2", "1048576");
+    CHECK(r == 32, "pwhash derives 32 bytes");
+    sxt_bin2hex(hex, (int)sizeof(hex), key, 32);
+    CHECK(strcmp(hex, "7216b4357104ed7f8a4e900e9cc7a63a0786855abe0b59340053ee43f841228a") == 0,
+          "Argon2id(password, salt=Ax16, ops=2, mem=1MiB) matches the KAT");
+
+    CHECK(sxt_pwhash(key, 32, 32, (const unsigned char *)"password", 8, salt, 8,
+                     "2", "1048576") == SXT_ERR_BADARG,
+          "wrong salt length -> BADARG");
+    CHECK(sxt_pwhash(key, 32, 32, (const unsigned char *)"password", 8, salt, 16,
+                     "abc", "1048576") == SXT_ERR_BADARG,
+          "non-numeric opslimit -> BADARG");
+
+    /* pwhash_str round trip, then verify against a pinned stored hash. */
+    r = sxt_pwhash_str(hashstr, (int)sizeof(hashstr),
+                       (const unsigned char *)"hunter2", 7, "2", "1048576");
+    CHECK(r > 0, "pwhash_str produces a string");
+    CHECK(sxt_pwhash_str_verify(hashstr, (const unsigned char *)"hunter2", 7) == 1,
+          "pwhash_str verify accepts the right passphrase");
+    CHECK(sxt_pwhash_str_verify(hashstr, (const unsigned char *)"nope", 4) == 0,
+          "pwhash_str verify rejects the wrong passphrase");
+    CHECK(sxt_pwhash_str_verify(pinned, (const unsigned char *)"password", 8) == 1,
+          "verify accepts the pinned stored Argon2id string");
+    CHECK(sxt_pwhash_str_verify(pinned, (const unsigned char *)"wrongpass", 9) == 0,
+          "verify rejects a wrong passphrase against the pinned string");
+}
+
 int main(void)
 {
     printf("SodiumXT smoke test\n");
@@ -309,6 +433,9 @@ int main(void)
     test_hashing();
     test_encoding();
     test_memequal();
+    test_secretbox();
+    test_aead();
+    test_pwhash();
 
     printf("-------------------\n");
     if (g_failures == 0) {
