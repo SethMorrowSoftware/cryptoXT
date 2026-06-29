@@ -50,8 +50,12 @@ real OXT compile. See the banner at the top of `src/sodium.lcb`.
   package the native library.
 - **`examples/sodium-tests.livecodescript`** - an xTalk self-test harness: `put sxSelfTest()`
   runs every capability through round-trips, known-answer vectors, and tamper checks.
-- **`examples/sodium-demo.livecodescript`** - a small interactive demo stack (passphrase-based
-  authenticated encryption + hashing) that builds its own UI on open.
+- **`examples/sodium-demo.livecodescript`** - an interactive showcase stack that builds its own
+  UI on open. A hands-on panel does passphrase-based authenticated encryption (random salt ->
+  Argon2id -> secretbox) and hashing; a guided "capability tour" (one button per category, plus
+  Run Full Tour) narrates every part of the library into a log: BLAKE2b + hex/base64, Argon2id +
+  KDF, secretbox + AEAD, X25519 box + sealed box, ed25519 sign/verify, crypto_kx, secretstream,
+  and whole-file encryption.
 
 ## Build and test
 
