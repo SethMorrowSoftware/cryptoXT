@@ -6,10 +6,11 @@
 # docs/SodiumXT-IMPLEMENTATION-PLAN.md sections 3 and 7, and CLAUDE.md.
 #
 # libsodium's own build is autotools. On Linux and macOS we drive that via
-# ExternalProject (the known-good path), then import the resulting static lib.
-# The Windows/MSVC build path is the one remaining Phase 0 CI item (plan Risk
-# #6); it errors loudly below rather than guessing, so a Windows build fails
-# informatively instead of silently linking the wrong thing.
+# ExternalProject (the known-good path), then import the resulting static lib;
+# cross builds (32-bit Linux, universal macOS) pass extra flags through the
+# SODIUMXT_LIBSODIUM_CFLAGS / _CONFIGURE_EXTRA cache vars. On Windows/MSVC we
+# link the libsodium that vcpkg provides (CI installs it and passes the vcpkg
+# toolchain). Either way libsodium is static-linked into the one shared library.
 
 cmake_minimum_required(VERSION 3.16)
 
@@ -36,6 +37,14 @@ set(SODIUMXT_LIBSODIUM_SHA256
 
 option(SODIUMXT_BUILD_TESTS "Build the C smoke test (ctest)" OFF)
 option(SODIUMXT_SANITIZE    "Build the smoke test under gcc ASan + UBSan" OFF)
+
+# Cross-build hooks for the libsodium autotools build (empty = native build,
+# byte-identical to the default path). 32-bit Linux: set CFLAGS=-m32 and a
+# --host. Universal macOS: set CFLAGS to both -arch flags.
+set(SODIUMXT_LIBSODIUM_CFLAGS "" CACHE STRING
+    "Extra CFLAGS for the libsodium build (e.g. -m32, or '-arch arm64 -arch x86_64')")
+set(SODIUMXT_LIBSODIUM_CONFIGURE_EXTRA "" CACHE STRING
+    "Extra args for libsodium ./configure (e.g. --host=i686-pc-linux-gnu)")
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
@@ -66,44 +75,53 @@ set(_sodium_include "${_sodium_install}/include")
 set(_sodium_lib
     "${_sodium_install}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}sodium${CMAKE_STATIC_LIBRARY_SUFFIX}")
 
+# SODIUMXT_SODIUM_LINK is the libsodium target our shim links against;
+# SODIUMXT_USE_EXTPROJ says whether we built it ourselves (so targets must depend
+# on libsodium_ext) or imported it from vcpkg (MSVC).
+set(SODIUMXT_USE_EXTPROJ TRUE)
+
 if(MSVC)
-    # libsodium ships an MSVC solution under builds/msvc; wiring that (or vcpkg)
-    # into this import is the remaining Phase 0 task. Fail clearly rather than
-    # produce a half-built library.
-    message(FATAL_ERROR
-        "SodiumXT: the MSVC libsodium build path is not wired up yet (plan Risk #6). "
-        "Build on Linux/macOS for now, or supply a prebuilt static libsodium and "
-        "set _sodium_lib / _sodium_include by hand.")
+    # vcpkg supplies libsodium via its CONFIG package. CI installs
+    # libsodium:<triplet>-static and passes the vcpkg toolchain file.
+    set(SODIUMXT_USE_EXTPROJ FALSE)
+    find_package(unofficial-sodium CONFIG REQUIRED)
+    set(SODIUMXT_SODIUM_LINK unofficial-sodium::sodium)
 else()
+    # Build the pinned source via autotools. Assemble the configure command as a
+    # list so the cross-build knobs only appear when set (empty = the verified
+    # native invocation, unchanged).
+    set(_sodium_configure <SOURCE_DIR>/configure
+                          --prefix=<INSTALL_DIR>
+                          --enable-static --disable-shared
+                          --with-pic                 # static objects link into our .so
+                          --disable-dependency-tracking)
+    if(SODIUMXT_LIBSODIUM_CFLAGS)
+        list(APPEND _sodium_configure "CFLAGS=${SODIUMXT_LIBSODIUM_CFLAGS}")
+    endif()
+    if(SODIUMXT_LIBSODIUM_CONFIGURE_EXTRA)
+        separate_arguments(_sodium_extra UNIX_COMMAND "${SODIUMXT_LIBSODIUM_CONFIGURE_EXTRA}")
+        list(APPEND _sodium_configure ${_sodium_extra})
+    endif()
     ExternalProject_Add(libsodium_ext
         URL              "${SODIUMXT_LIBSODIUM_URL}"
         URL_HASH         "SHA256=${SODIUMXT_LIBSODIUM_SHA256}"
         PREFIX           "${_sodium_prefix}"
-        # --with-pic: the static objects get linked into our SHARED library, so
-        # they must be position independent. static-only keeps it self-contained.
-        CONFIGURE_COMMAND <SOURCE_DIR>/configure
-                          --prefix=<INSTALL_DIR>
-                          --enable-static --disable-shared
-                          --with-pic
-                          --disable-dependency-tracking
+        CONFIGURE_COMMAND ${_sodium_configure}
         BUILD_COMMAND     ${SODIUMXT_MAKE} -j ${SODIUMXT_NPROC}
         INSTALL_COMMAND   ${SODIUMXT_MAKE} install
         INSTALL_DIR       "${_sodium_install}"
         BUILD_BYPRODUCTS  "${_sodium_lib}"
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
+    # Import the not-yet-built static lib. The include dir must exist at configure
+    # time for the INTERFACE include to be valid, so create it up front. SYSTEM so
+    # libsodium's headers never pollute our -Wall -Wextra.
+    file(MAKE_DIRECTORY "${_sodium_include}")
+    add_library(sodiumxt::libsodium STATIC IMPORTED GLOBAL)
+    set_target_properties(sodiumxt::libsodium PROPERTIES IMPORTED_LOCATION "${_sodium_lib}")
+    target_include_directories(sodiumxt::libsodium SYSTEM INTERFACE "${_sodium_include}")
+    set(SODIUMXT_SODIUM_LINK sodiumxt::libsodium)
 endif()
-
-# Import the not-yet-built static lib. The include dir must exist at configure
-# time for the INTERFACE include to be valid, so create it up front.
-file(MAKE_DIRECTORY "${_sodium_include}")
-
-add_library(sodiumxt::libsodium STATIC IMPORTED GLOBAL)
-set_target_properties(sodiumxt::libsodium PROPERTIES
-    IMPORTED_LOCATION "${_sodium_lib}")
-# SYSTEM so libsodium's own headers never pollute our -Wall -Wextra. Our code
-# stays warning-clean; theirs is treated as a system header.
-target_include_directories(sodiumxt::libsodium SYSTEM INTERFACE "${_sodium_include}")
 
 # ---------------------------------------------------------------------------
 # Warning flags applied to OUR code only (libsodium headers are SYSTEM above).
@@ -121,7 +139,9 @@ endfunction()
 # only the SXT_API-tagged sxt_* symbols are exported.
 # ---------------------------------------------------------------------------
 add_library(sodiumxt SHARED src/sodium_shim.c)
-add_dependencies(sodiumxt libsodium_ext)
+if(SODIUMXT_USE_EXTPROJ)
+    add_dependencies(sodiumxt libsodium_ext)
+endif()
 set_target_properties(sodiumxt PROPERTIES
     PREFIX ""                 # no "lib" prefix: the engine resolves the bare token
     OUTPUT_NAME "sodiumxt"
@@ -130,7 +150,7 @@ set_target_properties(sodiumxt PROPERTIES
     C_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON)
 target_include_directories(sodiumxt PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(sodiumxt PRIVATE sodiumxt::libsodium)
+target_link_libraries(sodiumxt PRIVATE ${SODIUMXT_SODIUM_LINK})
 sodiumxt_apply_warnings(sodiumxt)
 
 # Export ONLY the sxt_* ABI. Hidden visibility (above) governs our own code, but
@@ -153,11 +173,13 @@ endif()
 if(SODIUMXT_BUILD_TESTS)
     enable_testing()
     add_executable(sodium_smoke_test tests/sodium_smoke_test.c src/sodium_shim.c)
-    add_dependencies(sodium_smoke_test libsodium_ext)
+    if(SODIUMXT_USE_EXTPROJ)
+        add_dependencies(sodium_smoke_test libsodium_ext)
+    endif()
     set_target_properties(sodium_smoke_test PROPERTIES
         C_STANDARD 11 C_STANDARD_REQUIRED ON)
     target_include_directories(sodium_smoke_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-    target_link_libraries(sodium_smoke_test PRIVATE sodiumxt::libsodium)
+    target_link_libraries(sodium_smoke_test PRIVATE ${SODIUMXT_SODIUM_LINK})
     sodiumxt_apply_warnings(sodium_smoke_test)
 
     if(SODIUMXT_SANITIZE AND NOT MSVC)

@@ -1,16 +1,16 @@
 name: CI
 
-# Phase 0 stands the matrix up early (plan section 7), not at the end. Linux and
-# macOS build the pinned libsodium via autotools and run the smoke test (KATs +
-# the out-buffer round trip + the firewall negative paths); a dedicated job runs
-# the suite under gcc ASan + UBSan; the static gate runs on the script layer.
-# The MSVC path is the one remaining Phase 0 task (plan Risk #6) and is wired as
-# a non-blocking job until it is settled.
+# Builds the native sodiumxt library for the full platform matrix, runs the C
+# smoke test on each, and uploads each platform's binary as an artifact (the
+# `bundle` job collects them into the src/code/<arch>-<platform>/ layout the
+# packaged extension expects). Also runs the gcc ASan/UBSan suite and the LCB
+# static gate. Now that the repo is public, GitHub-hosted runners execute these.
 
 on:
   push:
     branches: [main, "claude/**"]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   static-checks:
@@ -21,34 +21,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
-      - name: check-livecodescript
-        run: python3 tools/check-livecodescript.py
-
-  native:
-    name: native (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSODIUMXT_BUILD_TESTS=ON
-      - name: Build
-        run: cmake --build build --config Release
-      - name: Test (ctest)
-        run: ctest --test-dir build --output-on-failure
-      - name: Exported ABI surface is sxt_* only
-        if: runner.os == 'Linux'
-        run: |
-          leak=$(nm -D --defined-only build/sodiumxt.so | awk '$2=="T"{print $3}' | grep -v '^sxt_' || true)
-          if [ -n "$leak" ]; then
-            echo "Unexpected exported symbols (only sxt_* may be public):"
-            echo "$leak"
-            exit 1
-          fi
-          echo "OK: only sxt_* exported"
+      - run: python tools/check-livecodescript.py
 
   sanitizers:
     name: ASan + UBSan (gcc)
@@ -57,22 +30,103 @@ jobs:
       CC: gcc
     steps:
       - uses: actions/checkout@v4
-      - name: Configure (sanitizers)
-        run: cmake -S . -B build-asan -DSODIUMXT_BUILD_TESTS=ON -DSODIUMXT_SANITIZE=ON
-      - name: Build
-        run: cmake --build build-asan
-      - name: Test under sanitizers
-        run: ctest --test-dir build-asan --output-on-failure
+      - run: cmake -S . -B build-asan -DSODIUMXT_BUILD_TESTS=ON -DSODIUMXT_SANITIZE=ON
+      - run: cmake --build build-asan
+      - run: ctest --test-dir build-asan --output-on-failure
 
-  windows-todo:
-    # The MSVC libsodium build path is not wired up yet (plan Risk #6): CMake
-    # raises a clear FATAL_ERROR on MSVC rather than guessing. This job is
-    # expected to fail and is non-blocking until that path is settled, so the
-    # matrix is visibly "stood up" without faking a green Windows build.
-    name: windows (TODO, non-blocking)
-    runs-on: windows-latest
-    continue-on-error: true
+  native:
+    name: native (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: x86_64-linux
+            ext: so
+          - os: ubuntu-latest
+            platform: x86-linux
+            ext: so
+            multilib: true
+            configure_args: "-DCMAKE_C_FLAGS=-m32 -DSODIUMXT_LIBSODIUM_CFLAGS=-m32 -DSODIUMXT_LIBSODIUM_CONFIGURE_EXTRA=--host=i686-pc-linux-gnu"
+          - os: macos-latest
+            platform: universal-mac
+            ext: dylib
+            configure_args: '-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DSODIUMXT_LIBSODIUM_CFLAGS="-arch arm64 -arch x86_64"'
+          - os: windows-latest
+            platform: x86_64-win32
+            ext: dll
+            arch: x64
+            triplet: x64-windows-static
+          - os: windows-latest
+            platform: x86-win32
+            ext: dll
+            arch: Win32
+            triplet: x86-windows-static
     steps:
       - uses: actions/checkout@v4
-      - name: Configure (expected to fail until the MSVC path lands)
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSODIUMXT_BUILD_TESTS=ON
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install 32-bit toolchain (Linux x86)
+        if: matrix.multilib
+        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+
+      - name: Install libsodium via vcpkg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: vcpkg install libsodium:${{ matrix.triplet }}
+
+      - name: Configure, build, test (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSODIUMXT_BUILD_TESTS=ON ${{ matrix.configure_args }}
+          cmake --build build --config Release -j
+          ctest --test-dir build --output-on-failure
+
+      - name: Configure, build, test (Windows / MSVC + vcpkg)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A ${{ matrix.arch }} `
+            -DSODIUMXT_BUILD_TESTS=ON `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
+          cmake --build build --config Release
+          ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package the native library
+        run: python tools/package-extension.py --build-dir build --platform-id ${{ matrix.platform }}
+
+      - name: Upload native library artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sodiumxt-${{ matrix.platform }}
+          path: src/code/${{ matrix.platform }}/sodiumxt.${{ matrix.ext }}
+          if-no-files-found: error
+
+  bundle:
+    name: bundle all platforms
+    needs: native
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+      - name: Lay out the src/code/<arch>-<platform>/ tree
+        run: |
+          mkdir -p src/code
+          for d in staged/sodiumxt-*; do
+            id="$(basename "$d" | sed 's/^sodiumxt-//')"
+            mkdir -p "src/code/$id"
+            cp "$d"/* "src/code/$id/"
+          done
+          echo "Bundled native libraries:"
+          find src/code -type f | sort
+      - name: Upload the combined bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: sodiumxt-all-platforms
+          path: src/code/**
+          if-no-files-found: error

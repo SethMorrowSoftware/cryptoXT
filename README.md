@@ -48,6 +48,10 @@ real OXT compile. See the banner at the top of `src/sodium.lcb`.
   Read it first.
 - **`docs/building.md`** - how to build, test under sanitizers, run the static gate, and
   package the native library.
+- **`examples/sodium-tests.livecodescript`** - an xTalk self-test harness: `put sxSelfTest()`
+  runs every capability through round-trips, known-answer vectors, and tamper checks.
+- **`examples/sodium-demo.livecodescript`** - a small interactive demo stack (passphrase-based
+  authenticated encryption + hashing) that builds its own UI on open.
 
 ## Build and test
 
@@ -59,6 +63,14 @@ python3 tools/check-livecodescript.py
 ```
 
 See `docs/building.md` for the sanitizer build and packaging.
+
+## Native libraries (CI)
+
+`.github/workflows/ci.yml` builds the native `sodiumxt` library for the whole platform matrix
+on every push - `x86_64-linux`, `x86-linux`, `universal-mac`, `x86_64-win32`, `x86-win32`
+(Windows links libsodium from vcpkg; the others build the pinned source) - runs the C smoke
+test on each, and uploads each platform's binary as an artifact, plus a combined
+`sodiumxt-all-platforms` bundle laid out as `src/code/<arch>-<platform>/`.
 
 ## Why it exists
 
