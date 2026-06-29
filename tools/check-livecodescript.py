@@ -234,6 +234,44 @@ def check_shadow_trap(path, stripped_lines, problems):
                     f"(prefixed-token-shadow trap); choose a different stem"))
 
 
+# Foreign types live in com.livecode.foreign; if a .lcb uses any of them it must
+# `use` that module (a "not declared" compile error otherwise). textEncode /
+# textDecode are NOT available to an LCB module (they are LiveCode Script only),
+# so flag them in .lcb code. Both gaps cost a real OXT compile cycle.
+FOREIGN_TYPES = {
+    "pointer", "cbool", "cchar", "cuchar", "cschar", "cshort", "cushort",
+    "cint", "cuint", "clong", "culong", "cfloat", "cdouble", "csize",
+    "zstringutf8", "zstringutf16", "zstringnative", "naturalfloat", "naturaluint",
+}
+
+
+def check_lcb_imports(path, stripped_lines, problems):
+    used = set()
+    type_hit = None
+    text_hits = []
+    for lineno, sline in enumerate(stripped_lines, start=1):
+        m = re.match(r"\s*use\s+([A-Za-z0-9_.]+)", sline)
+        if m:
+            used.add(m.group(1))
+            continue
+        for ident in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", sline):
+            low = ident.lower()
+            if type_hit is None and low in FOREIGN_TYPES:
+                type_hit = (lineno, ident)
+            if ident in ("textEncode", "textDecode"):
+                text_hits.append((lineno, ident))
+    if type_hit is not None and "com.livecode.foreign" not in used:
+        problems.append(Problem(
+            path, type_hit[0],
+            f"foreign type `{type_hit[1]}` used but `use com.livecode.foreign` "
+            f"is missing (it will not be declared on an OXT compile)"))
+    for lineno, ident in text_hits:
+        problems.append(Problem(
+            path, lineno,
+            f"`{ident}` is a LiveCode Script function, not available to an LCB "
+            f"module; keep text<->Data conversion in script or pass Data"))
+
+
 def check_file(path, problems):
     with open(path, "r", encoding="utf-8") as handle:
         text = handle.read()
@@ -246,6 +284,8 @@ def check_file(path, problems):
     check_balance(path, stripped_lines, is_script, problems)
     check_constants_before_use(path, stripped_lines, problems)
     check_shadow_trap(path, stripped_lines, problems)
+    if not is_script:
+        check_lcb_imports(path, stripped_lines, problems)
 
 
 def discover(root):
