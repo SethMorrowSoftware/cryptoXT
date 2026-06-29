@@ -166,6 +166,58 @@ elseif(NOT MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+# Place the built library where the packaged extension expects it:
+#     src/code/<arch>-<platform>/sodiumxt.{so,dll,dylib}
+# so a plain `cmake --build` is SELF-SUFFICIENT: the engine can resolve
+# "c:sodiumxt>" with no separate step. tools/package-extension.py still does the
+# same copy for a build tree you would rather not reconfigure, but the easy-to-
+# miss second step is no longer on the normal local path (it bit us on Windows,
+# where the .dll was left in build/ and never reached src/code/).
+# ---------------------------------------------------------------------------
+option(SODIUMXT_PLACE_IN_SRC
+       "Copy the built library into src/code/<id>/ after building" ON)
+
+# Architecture-first id; Windows is -win32 for BOTH bitnesses; macOS files under
+# the canonical universal-mac (a local dylib is single-arch; the CI build is the
+# lipo'd universal one). Bitness is the TARGET pointer width, so a -m32 cross
+# build correctly resolves to x86. Override with -DSODIUMXT_PLATFORM_ID=<id>.
+if(APPLE)
+    set(_sxt_default_id "universal-mac")
+elseif(WIN32)
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(_sxt_default_id "x86_64-win32")
+    else()
+        set(_sxt_default_id "x86-win32")
+    endif()
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(_sxt_default_id "x86_64-linux")
+    else()
+        set(_sxt_default_id "x86-linux")
+    endif()
+else()
+    set(_sxt_default_id "")
+endif()
+set(SODIUMXT_PLATFORM_ID "${_sxt_default_id}" CACHE STRING
+    "Platform id for the src/code/<id>/ bundle (override for cross builds)")
+
+if(SODIUMXT_PLACE_IN_SRC AND SODIUMXT_PLATFORM_ID)
+    set(_sxt_bundle_dir "${CMAKE_CURRENT_SOURCE_DIR}/src/code/${SODIUMXT_PLATFORM_ID}")
+    add_custom_command(TARGET sodiumxt POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${_sxt_bundle_dir}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:sodiumxt>"
+                "${_sxt_bundle_dir}/$<TARGET_FILE_NAME:sodiumxt>"
+        COMMENT "Bundling sodiumxt -> src/code/${SODIUMXT_PLATFORM_ID}/"
+        VERBATIM)
+elseif(SODIUMXT_PLACE_IN_SRC AND NOT SODIUMXT_PLATFORM_ID)
+    message(WARNING
+        "SODIUMXT_PLACE_IN_SRC is ON but the platform id could not be detected "
+        "(system='${CMAKE_SYSTEM_NAME}'). Pass -DSODIUMXT_PLATFORM_ID=<id> to "
+        "place the built library under src/code/<id>/.")
+endif()
+
+# ---------------------------------------------------------------------------
 # Smoke test (KATs + the out-buffer round trip + the firewall negative paths).
 # The test links the shim SOURCE directly (not the .so), so it exercises the
 # same objects under the sanitizers.
