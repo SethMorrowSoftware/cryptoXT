@@ -1,0 +1,197 @@
+-- sodium.lcb - the LiveCode Builder binding for SodiumXT (public sx* surface).
+--
+-- This thin layer sits on top of the C shim (src/sodium_shim.c, ABI sxt_*) and
+-- presents friendly handlers to xTalk. Phase 0 surface ONLY: sxInit, sxVersion,
+-- sxLastError, sxRandomBytes. Everything else is downstream of proving the
+-- buffer round trip (the plan's Phase 0 gate).
+--
+-- ==========================================================================
+-- NEEDS AN OXT PASS. There is no headless way to compile or run .lcb in this
+-- environment, so this file is "verified statically" only: it passes
+-- tools/check-livecodescript.py (smart quotes, handler/control/unsafe balance,
+-- constant-before-use, the prefixed-token-shadow trap). The engine-specific
+-- bits below CANNOT be verified here and must be reconciled, verbatim, against
+-- the proven foreign declarations in our sibling extension TorrentXT during a
+-- real OXT compile:
+--   * the exact <builtin> signatures for MCMemoryAllocate / MCMemoryDeallocate /
+--     MCDataCreateWithBytes (in particular the integer WIDTH of the size and
+--     length parameters: a size_t on a 64-bit host is not a CUInt);
+--   * whether any `use` clause is required for the foreign types;
+--   * numeric-to-string coercion inside the throw messages.
+-- Do not claim runtime behaviour from this file until that pass is done.
+-- ==========================================================================
+
+library org.openxtalk.library.sodium
+
+metadata version    is "0.1.0"
+metadata author     is "OpenXTalk"
+metadata title      is "SodiumXT"
+metadata summary    is "Modern cryptography for xTalk via libsodium (authenticated encryption, Argon2id, streaming AEAD, X25519, ed25519, BLAKE2b, CSPRNG)."
+
+-- These two constants mirror the C side and MUST be kept in step with it:
+--   kSXTABIVersion  == SXT_ABI_VERSION   in src/sodium_shim.h
+--   kSXTErrBase     == SXT_ERR_BASE      in src/sodium_shim.h
+-- They are declared here, before first use, because OXT resolves a constant by
+-- lexical position: a forward reference silently evaluates to nothing.
+constant kSXTABIVersion is 1
+constant kSXTErrBase is -2000000000
+
+-- --------------------------------------------------------------------------
+-- Engine allocator + Data builders (resolve by NAME, so NO leading underscore).
+-- An LCB Data does not auto-bridge to a void*, so an out buffer is a raw block
+-- from MCMemoryAllocate passed as a Pointer, and the written bytes are copied
+-- back into a Data with MCDataCreateWithBytes. (CLAUDE.md, "FFI / C-ABI".)
+-- --------------------------------------------------------------------------
+foreign handler MCMemoryAllocate(in pSize as CUInt, out rPtr as Pointer) returns CBool binds to "<builtin>"
+foreign handler MCMemoryDeallocate(in pPtr as Pointer) returns nothing binds to "<builtin>"
+foreign handler MCDataCreateWithBytes(in pBytes as Pointer, in pByteCount as CUInt, out rData as Data) returns CBool binds to "<builtin>"
+
+-- --------------------------------------------------------------------------
+-- The SodiumXT C ABI. Our own foreign decls keep the private _sxt_* name; the
+-- bind strings reference the stable exported symbols by name.
+-- --------------------------------------------------------------------------
+foreign handler _sxt_init() returns CInt binds to "c:sodiumxt>sxt_init"
+foreign handler _sxt_version() returns ZStringUTF8 binds to "c:sodiumxt>sxt_version"
+foreign handler _sxt_sodium_version() returns ZStringUTF8 binds to "c:sodiumxt>sxt_sodium_version"
+foreign handler _sxt_abi_version() returns CInt binds to "c:sodiumxt>sxt_abi_version"
+foreign handler _sxt_last_error() returns ZStringUTF8 binds to "c:sodiumxt>sxt_last_error"
+foreign handler _sxt_randombytes(in pOut as Pointer, in pCap as CInt, in pCount as CInt) returns CInt binds to "c:sodiumxt>sxt_randombytes"
+
+-- --------------------------------------------------------------------------
+-- Internal: verify the ABI matches and ensure libsodium is initialized. Called
+-- at the top of every public entry. checkABI throws on skew instead of letting
+-- a mismatched native library corrupt memory on first use; init is idempotent
+-- and cheap (a static guard lives in the shim), so calling per-entry is fine.
+-- All declarations are at the top of the handler (a nested `local` has broken
+-- whole-script compilation in OXT), and every foreign call is bracketed by
+-- `unsafe ... end unsafe`.
+-- --------------------------------------------------------------------------
+private handler sPrepare() returns nothing
+   variable tAbi as Integer
+   variable tRc as Integer
+
+   unsafe
+      put _sxt_abi_version() into tAbi
+   end unsafe
+   if tAbi is not kSXTABIVersion then
+      throw "SodiumXT ABI mismatch: native library reports" && tAbi & ", extension expects" && kSXTABIVersion & ". Reinstall the packaged extension."
+   end if
+
+   unsafe
+      put _sxt_init() into tRc
+   end unsafe
+   if tRc is not 0 then
+      throw "SodiumXT: libsodium failed to initialize."
+   end if
+end handler
+
+-- Initialize explicitly (optional; every entry auto-initializes). Throws with a
+-- clear message on ABI skew or a failed init, so a host can fail fast on load.
+public handler sxInit() returns nothing
+   sPrepare()
+end handler
+
+-- The extension and linked-libsodium versions, e.g.
+--   "SodiumXT 0.1.0 (libsodium 1.0.20)".
+public handler sxVersion() returns String
+   variable tProductVer as String
+   variable tSodiumVer as String
+
+   sPrepare()
+   unsafe
+      put _sxt_version() into tProductVer
+      put _sxt_sodium_version() into tSodiumVer
+   end unsafe
+   return "SodiumXT" && tProductVer && "(libsodium" && tSodiumVer & ")"
+end handler
+
+-- The last error text from the native layer, or "" when clean. Deliberately does
+-- NOT call sPrepare (it is used from error paths; we must not throw from here).
+public handler sxLastError() returns String
+   variable tMsg as String
+
+   unsafe
+      put _sxt_last_error() into tMsg
+   end unsafe
+   return tMsg
+end handler
+
+-- Return pCount cryptographically secure random bytes (libsodium randombytes_buf).
+-- This is the ONLY sanctioned source of salts, nonces, and keys: never use the
+-- engine `random()` for anything that must be unguessable.
+--
+-- This handler is the reference implementation of the out-buffer dance every
+-- later cipher follows: allocate a block, call the shim, and if the shim returns
+-- a negative "-needed" (a required size, distinct from the hard-error band below
+-- kSXTErrBase) reallocate to that size and call once more, then copy exactly the
+-- written bytes back into a Data. For randombytes the first block is already the
+-- right size, so the retry branch is proven by the C smoke test rather than
+-- exercised here; the machinery lives here so size-unknown calls inherit it.
+public handler sxRandomBytes(in pCount as Integer) returns Data
+   variable tCap as Integer
+   variable tPtr as Pointer
+   variable tWritten as Integer
+   variable tNeeded as Integer
+   variable tOk as CBool
+   variable tResult as Data
+
+   sPrepare()
+
+   if pCount < 0 then
+      throw "sxRandomBytes: count must be zero or positive."
+   end if
+
+   -- Always allocate at least one byte so the Pointer is valid even for a
+   -- zero-byte request; we still pass the true count and copy back exactly what
+   -- the shim wrote (a count of 0 yields an empty Data).
+   put pCount into tCap
+   if tCap is 0 then
+      put 1 into tCap
+   end if
+
+   unsafe
+      put MCMemoryAllocate(tCap, tPtr) into tOk
+   end unsafe
+   if not tOk then
+      throw "sxRandomBytes: out of memory."
+   end if
+
+   unsafe
+      put _sxt_randombytes(tPtr, tCap, pCount) into tWritten
+   end unsafe
+
+   -- Negative but above the hard-error band: it is -needed. Grow and retry once.
+   if tWritten < 0 and tWritten > kSXTErrBase then
+      put -tWritten into tNeeded
+      unsafe
+         MCMemoryDeallocate(tPtr)
+         put MCMemoryAllocate(tNeeded, tPtr) into tOk
+      end unsafe
+      if not tOk then
+         throw "sxRandomBytes: out of memory."
+      end if
+      put tNeeded into tCap
+      unsafe
+         put _sxt_randombytes(tPtr, tCap, pCount) into tWritten
+      end unsafe
+   end if
+
+   -- At or below the hard-error band: a real failure. Free, then surface text.
+   if tWritten <= kSXTErrBase then
+      unsafe
+         MCMemoryDeallocate(tPtr)
+      end unsafe
+      throw "sxRandomBytes:" && sxLastError()
+   end if
+
+   -- Success: copy exactly the written bytes into a Data, then free the block.
+   unsafe
+      put MCDataCreateWithBytes(tPtr, tWritten, tResult) into tOk
+      MCMemoryDeallocate(tPtr)
+   end unsafe
+   if not tOk then
+      throw "sxRandomBytes: could not build result data."
+   end if
+
+   return tResult
+end handler

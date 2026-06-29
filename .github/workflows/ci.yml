@@ -1,0 +1,78 @@
+name: CI
+
+# Phase 0 stands the matrix up early (plan section 7), not at the end. Linux and
+# macOS build the pinned libsodium via autotools and run the smoke test (KATs +
+# the out-buffer round trip + the firewall negative paths); a dedicated job runs
+# the suite under gcc ASan + UBSan; the static gate runs on the script layer.
+# The MSVC path is the one remaining Phase 0 task (plan Risk #6) and is wired as
+# a non-blocking job until it is settled.
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+
+jobs:
+  static-checks:
+    name: LCB static gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: check-livecodescript
+        run: python3 tools/check-livecodescript.py
+
+  native:
+    name: native (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSODIUMXT_BUILD_TESTS=ON
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Test (ctest)
+        run: ctest --test-dir build --output-on-failure
+      - name: Exported ABI surface is sxt_* only
+        if: runner.os == 'Linux'
+        run: |
+          leak=$(nm -D --defined-only build/sodiumxt.so | awk '$2=="T"{print $3}' | grep -v '^sxt_' || true)
+          if [ -n "$leak" ]; then
+            echo "Unexpected exported symbols (only sxt_* may be public):"
+            echo "$leak"
+            exit 1
+          fi
+          echo "OK: only sxt_* exported"
+
+  sanitizers:
+    name: ASan + UBSan (gcc)
+    runs-on: ubuntu-latest
+    env:
+      CC: gcc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (sanitizers)
+        run: cmake -S . -B build-asan -DSODIUMXT_BUILD_TESTS=ON -DSODIUMXT_SANITIZE=ON
+      - name: Build
+        run: cmake --build build-asan
+      - name: Test under sanitizers
+        run: ctest --test-dir build-asan --output-on-failure
+
+  windows-todo:
+    # The MSVC libsodium build path is not wired up yet (plan Risk #6): CMake
+    # raises a clear FATAL_ERROR on MSVC rather than guessing. This job is
+    # expected to fail and is non-blocking until that path is settled, so the
+    # matrix is visibly "stood up" without faking a green Windows build.
+    name: windows (TODO, non-blocking)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (expected to fail until the MSVC path lands)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSODIUMXT_BUILD_TESTS=ON

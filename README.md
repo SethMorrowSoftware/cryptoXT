@@ -1,12 +1,31 @@
-# SodiumXT (starter seed)
+# SodiumXT
 
-A starting point for **SodiumXT**, a [libsodium](https://libsodium.org) binding for
-OpenXTalk (OXT) / the xTalk family. It brings modern cryptography (authenticated encryption,
-Argon2id password hashing, a streaming AEAD for large files, X25519 boxes, ed25519
-signatures, BLAKE2b hashing, a real CSPRNG) to xTalk, behind a flat C ABI with an LCB layer
-on top, the same shape as its sibling extension TorrentXT.
+**SodiumXT** is a [libsodium](https://libsodium.org) binding for OpenXTalk (OXT) / the xTalk
+family. It brings modern cryptography (authenticated encryption, Argon2id password hashing, a
+streaming AEAD for large files, X25519 boxes, ed25519 signatures, BLAKE2b hashing, a real
+CSPRNG) to xTalk, behind a flat C ABI with an LCB layer on top, the same shape as its sibling
+extension TorrentXT.
 
-This seed contains only the guiding documents. There is no source yet, that is the work.
+## Status: Phase 0 (the FFI buffer round-trip)
+
+Phase 0 of `docs/SodiumXT-IMPLEMENTATION-PLAN.md` is in place: the build, the test harness,
+the tooling, and exactly two end-to-end entry points (`sxVersion`, `sxRandomBytes`) that prove
+a `Data` makes the script -> Pointer -> C -> Pointer -> `Data` trip intact. Everything else
+(hashing, secretbox, Argon2id, secretstream, box, sign) is downstream of that and is not built
+yet, on purpose.
+
+```
+src/sodium_shim.{c,h}   C shim, ABI sxt_*  ->  sodiumxt.{so,dll,dylib}  (one shared lib)
+src/sodium.lcb          LCB binding, public sx*  (verified statically; needs an OXT pass)
+tests/sodium_smoke_test.c   KATs + the out-buffer round trip + the firewall negative paths
+CMakeLists.txt          acquires a pinned libsodium (1.0.20) and static-links it
+tools/                  check-livecodescript.py (static gate) + package-extension.py
+```
+
+Verified here: the C shim builds warning-clean and the smoke test passes under gcc ASan +
+UBSan, the CMake build produces a `sodiumxt` shared library exporting ONLY the `sxt_*` surface,
+and the static checker is green. The `.lcb` layer is verified statically only (OXT has no
+headless compiler); see `src/sodium.lcb` for what still needs an on-engine pass.
 
 ## What is here
 
@@ -16,15 +35,19 @@ This seed contains only the guiding documents. There is no source yet, that is t
 - **`docs/SodiumXT-IMPLEMENTATION-PLAN.md`** - the full spec: the engine decision, the C ABI
   design, the capability surface, the phased plan, the test strategy, and the risk register.
   Read it first.
+- **`docs/building.md`** - how to build, test under sanitizers, run the static gate, and
+  package the native library.
 
-## How to start
+## Build and test
 
-1. Copy this folder into a fresh repo.
-2. Read `docs/SodiumXT-IMPLEMENTATION-PLAN.md`, then `CLAUDE.md`.
-3. Port `tools/check-livecodescript.py` and `tools/package-extension.py` from TorrentXT.
-4. Build **Phase 0** only (CMake + pinned libsodium + CI matrix + `sxVersion` +
-   `sxRandomBytes`), and prove a `Data` round-trips script -> Pointer -> C -> script intact
-   under ASan. Everything else is downstream of that working.
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSODIUMXT_BUILD_TESTS=ON
+cmake --build build --config Release
+ctest --test-dir build --output-on-failure
+python3 tools/check-livecodescript.py
+```
+
+See `docs/building.md` for the sanitizer build and packaging.
 
 ## Why it exists
 
