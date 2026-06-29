@@ -33,7 +33,7 @@ metadata summary    is "Modern cryptography for xTalk via libsodium (authenticat
 --   kSXTErrBase     == SXT_ERR_BASE      in src/sodium_shim.h
 -- They are declared here, before first use, because OXT resolves a constant by
 -- lexical position: a forward reference silently evaluates to nothing.
-constant kSXTABIVersion is 1
+constant kSXTABIVersion is 2
 constant kSXTErrBase is -2000000000
 
 -- --------------------------------------------------------------------------

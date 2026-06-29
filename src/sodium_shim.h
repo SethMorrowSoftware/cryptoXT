@@ -42,7 +42,7 @@ extern "C" {
  * clear "reinstall the extension" error on skew, instead of corrupting memory
  * on first use against a mismatched native library.
  */
-#define SXT_ABI_VERSION 1
+#define SXT_ABI_VERSION 2
 
 /*
  * The largest single in-memory out-buffer we will service. The return value of
@@ -68,9 +68,14 @@ extern "C" {
  * That disjointness is exactly what keeps the overload unambiguous, so do not
  * widen SXT_MAX_BUFFER without moving SXT_ERR_BASE in lockstep.
  */
-#define SXT_ERR_BASE   (-SXT_MAX_BUFFER)
-#define SXT_ERR_INIT   (SXT_ERR_BASE - 1)   /* sodium_init() failed             */
-#define SXT_ERR_BADARG (SXT_ERR_BASE - 2)   /* null pointer / bad length / args */
+#define SXT_ERR_BASE     (-SXT_MAX_BUFFER)
+#define SXT_ERR_INIT     (SXT_ERR_BASE - 1)  /* sodium_init() failed             */
+#define SXT_ERR_BADARG   (SXT_ERR_BASE - 2)  /* null pointer / bad length / args */
+#define SXT_ERR_AUTH     (SXT_ERR_BASE - 3)  /* tag/signature/verify failed:     */
+                                             /* wrong key or tampered data       */
+#define SXT_ERR_BADHANDLE (SXT_ERR_BASE - 4) /* stale/unknown stream/hash handle */
+#define SXT_ERR_IO       (SXT_ERR_BASE - 5)  /* file open/read/write failed      */
+#define SXT_ERR_ENCODING (SXT_ERR_BASE - 6)  /* malformed hex / base64 input     */
 
 /*
  * Status-only entry points (init) use the simpler 0 = ok / negative = error
@@ -121,6 +126,61 @@ SXT_API const char *SXT_CALL sxt_last_error(void);
  * CLAUDE.md rule 1).
  */
 SXT_API int SXT_CALL sxt_randombytes(unsigned char *out, int cap, int n);
+
+/* --- Phase 1: hashing + encoding + constant-time compare ------------------ */
+
+/*
+ * Length constants, exposed as functions so the LCB layer never hardcodes them
+ * (libsodium may change them across versions; a hardcoded length is a buffer
+ * overflow waiting to happen, CLAUDE.md). All return positive byte counts.
+ */
+SXT_API int SXT_CALL sxt_hash_bytes(void);          /* default digest size (32)  */
+SXT_API int SXT_CALL sxt_hash_bytes_min(void);      /* min digest size (16)      */
+SXT_API int SXT_CALL sxt_hash_bytes_max(void);      /* max digest size (64)      */
+SXT_API int SXT_CALL sxt_hash_keybytes(void);       /* default key size (32)     */
+SXT_API int SXT_CALL sxt_hash_keybytes_min(void);   /* min key size (0 allowed)  */
+SXT_API int SXT_CALL sxt_hash_keybytes_max(void);   /* max key size (64)         */
+
+/* base64 variants, mirroring libsodium's sodium_base64_VARIANT_* so the LCB
+ * layer passes a name-resolved int rather than a magic number. */
+SXT_API int SXT_CALL sxt_base64_variant_original(void);
+SXT_API int SXT_CALL sxt_base64_variant_original_no_padding(void);
+SXT_API int SXT_CALL sxt_base64_variant_urlsafe(void);
+SXT_API int SXT_CALL sxt_base64_variant_urlsafe_no_padding(void);
+
+/*
+ * BLAKE2b (crypto_generichash). Writes outlen bytes of digest of in[0..inlen).
+ * key is optional: keylen 0 means unkeyed; otherwise keylen must be in
+ * [keybytes_min, keybytes_max]. outlen must be in [bytes_min, bytes_max].
+ * Returns bytes written (== outlen), -needed, or a hard error.
+ */
+SXT_API int SXT_CALL sxt_generichash(unsigned char *out, int cap, int outlen,
+                                     const unsigned char *in, int inlen,
+                                     const unsigned char *key, int keylen);
+
+/*
+ * Hex / base64 encode and decode. The encoders report the string length WITHOUT
+ * the trailing NUL but require room for it internally (so a -needed reflects the
+ * NUL too); the decoders report the decoded byte count. A malformed hex/base64
+ * input is SXT_ERR_ENCODING, never a partial/garbage decode.
+ */
+SXT_API int SXT_CALL sxt_bin2hex(char *out, int cap,
+                                 const unsigned char *in, int inlen);
+SXT_API int SXT_CALL sxt_hex2bin(unsigned char *out, int cap,
+                                 const char *hex, int hexlen);
+SXT_API int SXT_CALL sxt_bin2base64(char *out, int cap,
+                                    const unsigned char *in, int inlen, int variant);
+SXT_API int SXT_CALL sxt_base642bin(unsigned char *out, int cap,
+                                    const char *b64, int b64len, int variant);
+
+/*
+ * Constant-time equality (sodium_memcmp). Returns 1 if equal, 0 if not. Lengths
+ * are not secret, so unequal lengths short-circuit to 0; equal lengths compare
+ * in constant time. NEVER compare a secret with the engine `is` / `=` (a timing
+ * leak); this is the only sanctioned comparison for MACs, tags, and hashes.
+ */
+SXT_API int SXT_CALL sxt_memequal(const unsigned char *a, int alen,
+                                  const unsigned char *b, int blen);
 
 #ifdef __cplusplus
 }
