@@ -150,7 +150,8 @@ def classify_opener(tokens, is_script):
         return first
     if first == "handler":
         return "handler"
-    if first in ("public", "private") and len(tokens) > 1 and tokens[1] == "handler":
+    if first in ("public", "private") and len(tokens) > 1 and \
+       tokens[1] in ("handler", "command", "function", "getter", "setter"):
         return "handler"
     if is_script and first in SCRIPT_HANDLER_OPENERS:
         return "handler"
@@ -158,8 +159,10 @@ def classify_opener(tokens, is_script):
         return "unsafe"
     if first == "repeat":
         return "repeat"
-    if first == "else":
-        return None                       # else / else if: same if block
+    if first == "try":
+        return "try"                      # try ... catch ... finally ... end try
+    if first in ("else", "catch", "finally"):
+        return None                       # continuation, not a new block
     if first == "if" and tokens[-1] == "then":
         return "if"                       # block if; single-line if has code after `then`
     return None
@@ -173,7 +176,7 @@ def check_balance(path, stripped_lines, is_script, problems):
             continue
         if tokens[0] == "end":
             what = tokens[1] if len(tokens) > 1 else ""
-            if what in ("if", "repeat", "unsafe", "library", "module", "widget"):
+            if what in ("if", "repeat", "unsafe", "try", "library", "module", "widget"):
                 if not stack or stack[-1][0] != what:
                     top = stack[-1][0] if stack else "nothing"
                     problems.append(Problem(
