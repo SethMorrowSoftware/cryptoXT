@@ -318,6 +318,85 @@ SXT_API int SXT_CALL sxt_encrypt_file(const char *src_path, const char *dst_path
 SXT_API int SXT_CALL sxt_decrypt_file(const char *src_path, const char *dst_path,
                                       const unsigned char *key, int keylen);
 
+/* --- Phase 4: public-key boxes (X25519) + signatures (ed25519) ----------- */
+
+/* box (X25519 + XSalsa20-Poly1305) length constants. */
+SXT_API int SXT_CALL sxt_box_publickeybytes(void);
+SXT_API int SXT_CALL sxt_box_secretkeybytes(void);
+SXT_API int SXT_CALL sxt_box_noncebytes(void);
+SXT_API int SXT_CALL sxt_box_macbytes(void);
+SXT_API int SXT_CALL sxt_box_sealbytes(void);
+
+/*
+ * Generate an X25519 keypair: writes publickeybytes into pk_out and
+ * secretkeybytes into sk_out. Two fixed-size outputs, so this returns SXT_OK or
+ * an error (a buffer too small is SXT_ERR_BADARG, since two outputs cannot share
+ * one -needed; the LCB always allocates from the length exposers).
+ */
+SXT_API int SXT_CALL sxt_box_keypair(unsigned char *pk_out, int pk_cap,
+                                     unsigned char *sk_out, int sk_cap);
+/*
+ * Authenticated public-key encryption from sender_sk to recipient_pk, with a
+ * fresh random nonce prepended (output is noncebytes + msglen + macbytes). Open
+ * returns SXT_ERR_AUTH on a wrong key or tampering.
+ */
+SXT_API int SXT_CALL sxt_box(unsigned char *out, int cap,
+                             const unsigned char *msg, int msglen,
+                             const unsigned char *recipient_pk, int pklen,
+                             const unsigned char *sender_sk, int sklen);
+SXT_API int SXT_CALL sxt_box_open(unsigned char *out, int cap,
+                                  const unsigned char *box, int boxlen,
+                                  const unsigned char *sender_pk, int pklen,
+                                  const unsigned char *recipient_sk, int sklen);
+/*
+ * Anonymous-sender sealed box (crypto_box_seal): the sender needs only the
+ * recipient's public key, and the recipient opens with their full keypair.
+ * Output is msglen + sealbytes. seal_open returns SXT_ERR_AUTH on failure.
+ */
+SXT_API int SXT_CALL sxt_box_seal(unsigned char *out, int cap,
+                                  const unsigned char *msg, int msglen,
+                                  const unsigned char *recipient_pk, int pklen);
+SXT_API int SXT_CALL sxt_box_seal_open(unsigned char *out, int cap,
+                                       const unsigned char *sealed, int sealedlen,
+                                       const unsigned char *recipient_pk, int pklen,
+                                       const unsigned char *recipient_sk, int sklen);
+
+/* sign (ed25519) length constants. */
+SXT_API int SXT_CALL sxt_sign_publickeybytes(void);
+SXT_API int SXT_CALL sxt_sign_secretkeybytes(void);
+SXT_API int SXT_CALL sxt_sign_bytes(void);
+SXT_API int SXT_CALL sxt_sign_seedbytes(void);
+
+/*
+ * ed25519 keypair, random or deterministically from a seedbytes seed. The
+ * seeded form is the BEP44-compatible primitive, so a SodiumXT key and a
+ * TorrentXT channel key can be one and the same (watch the seed-vs-expanded
+ * representation: libsodium's "secret key" is the 64-byte expanded form).
+ */
+SXT_API int SXT_CALL sxt_sign_keypair(unsigned char *pk_out, int pk_cap,
+                                      unsigned char *sk_out, int sk_cap);
+SXT_API int SXT_CALL sxt_sign_keypair_from_seed(unsigned char *pk_out, int pk_cap,
+                                                unsigned char *sk_out, int sk_cap,
+                                                const unsigned char *seed, int seedlen);
+
+/* Detached signature (bytes() long). verify returns 1 (valid) / 0 (invalid or
+ * malformed input); like sxt_memequal it never enters the error band. */
+SXT_API int SXT_CALL sxt_sign_detached(unsigned char *sig_out, int sig_cap,
+                                       const unsigned char *msg, int msglen,
+                                       const unsigned char *sk, int sklen);
+SXT_API int SXT_CALL sxt_sign_verify_detached(const unsigned char *sig, int siglen,
+                                              const unsigned char *msg, int msglen,
+                                              const unsigned char *pk, int pklen);
+
+/* Attached signature (signature || message, length bytes() + msglen). sign_open
+ * recovers the message or returns SXT_ERR_AUTH if the signature does not verify. */
+SXT_API int SXT_CALL sxt_sign(unsigned char *out, int cap,
+                              const unsigned char *msg, int msglen,
+                              const unsigned char *sk, int sklen);
+SXT_API int SXT_CALL sxt_sign_open(unsigned char *out, int cap,
+                                   const unsigned char *signed_msg, int signedlen,
+                                   const unsigned char *pk, int pklen);
+
 #ifdef __cplusplus
 }
 #endif

@@ -590,6 +590,98 @@ static void test_file_helpers(void)
     remove(dec);
 }
 
+/* ========================================================================== *
+ * Phase 4: public-key boxes (X25519) + signatures (ed25519).
+ * ========================================================================== */
+
+static void test_sign(void)
+{
+    unsigned char seed[32];
+    unsigned char pk[32];
+    unsigned char sk[64];
+    unsigned char sig[64];
+    unsigned char signed_msg[64 + 3];
+    unsigned char back[8];
+    char hex[2 * 64 + 1];
+    int r;
+    int sl;
+
+    printf("ed25519 sign/verify (deterministic KAT + auth):\n");
+    memset(seed, 0, sizeof(seed));
+
+    CHECK(sxt_sign_keypair_from_seed(pk, 32, sk, 64, seed, 32) == SXT_OK,
+          "seeded keypair succeeds");
+    sxt_bin2hex(hex, (int)sizeof(hex), pk, 32);
+    CHECK(strcmp(hex, "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29") == 0,
+          "zero-seed public key matches the published ed25519 anchor");
+
+    r = sxt_sign_detached(sig, 64, (const unsigned char *)"abc", 3, sk, 64);
+    CHECK(r == 64, "detached signature is 64 bytes");
+    sxt_bin2hex(hex, (int)sizeof(hex), sig, 64);
+    CHECK(strcmp(hex,
+            "885dfb07cab2796eb960531a2f09b972ad59b97bb125bef5fdda0855d6bebebf"
+            "24447e705fa11575639df396c201ccf52a1a16b014a7a2f0ce73a7a161757308") == 0,
+          "signature of \"abc\" matches the deterministic KAT");
+
+    CHECK(sxt_sign_verify_detached(sig, 64, (const unsigned char *)"abc", 3, pk, 32) == 1,
+          "verify accepts the valid signature");
+    CHECK(sxt_sign_verify_detached(sig, 64, (const unsigned char *)"abd", 3, pk, 32) == 0,
+          "verify rejects a modified message");
+    sig[0] ^= 0x01;
+    CHECK(sxt_sign_verify_detached(sig, 64, (const unsigned char *)"abc", 3, pk, 32) == 0,
+          "verify rejects a modified signature");
+    sig[0] ^= 0x01;
+
+    /* attached form round trip + tamper */
+    sl = sxt_sign(signed_msg, (int)sizeof(signed_msg), (const unsigned char *)"abc", 3, sk, 64);
+    CHECK(sl == 64 + 3, "attached signed message is sig + msg");
+    CHECK(sxt_sign_open(back, (int)sizeof(back), signed_msg, sl, pk, 32) == 3 &&
+          memcmp(back, "abc", 3) == 0,
+          "sign_open recovers the message");
+    signed_msg[64] ^= 0x01;
+    CHECK(sxt_sign_open(back, (int)sizeof(back), signed_msg, sl, pk, 32) == SXT_ERR_AUTH,
+          "sign_open rejects a tampered signed message");
+}
+
+static void test_box(void)
+{
+    const unsigned char msg[7] = {'s', 'e', 'c', 'r', 'e', 't', 's'};
+    unsigned char apk[32], ask[32];
+    unsigned char bpk[32], bsk[32];
+    unsigned char cpk[32], csk[32];
+    unsigned char box[24 + 7 + 16];
+    unsigned char sealed[7 + 48];
+    unsigned char plain[8];
+    int boxlen;
+    int sealedlen;
+    int r;
+
+    printf("public-key box + seal (X25519):\n");
+    CHECK(sxt_box_keypair(apk, 32, ask, 32) == SXT_OK, "keypair A");
+    CHECK(sxt_box_keypair(bpk, 32, bsk, 32) == SXT_OK, "keypair B");
+    CHECK(sxt_box_keypair(cpk, 32, csk, 32) == SXT_OK, "keypair C");
+
+    boxlen = sxt_box(box, (int)sizeof(box), msg, 7, bpk, 32, ask, 32);  /* A -> B */
+    CHECK(boxlen == 24 + 7 + 16, "box output is nonce + msg + mac");
+    r = sxt_box_open(plain, (int)sizeof(plain), box, boxlen, apk, 32, bsk, 32);
+    CHECK(r == 7 && memcmp(plain, msg, 7) == 0, "box round trip A->B recovers plaintext");
+
+    CHECK(sxt_box_open(plain, (int)sizeof(plain), box, boxlen, apk, 32, csk, 32) == SXT_ERR_AUTH,
+          "wrong recipient secret key -> SXT_ERR_AUTH");
+    box[24] ^= 0x01;
+    CHECK(sxt_box_open(plain, (int)sizeof(plain), box, boxlen, apk, 32, bsk, 32) == SXT_ERR_AUTH,
+          "tampered box -> SXT_ERR_AUTH");
+    box[24] ^= 0x01;
+
+    sealedlen = sxt_box_seal(sealed, (int)sizeof(sealed), msg, 7, bpk, 32);
+    CHECK(sealedlen == 7 + 48, "seal output is msg + sealbytes");
+    r = sxt_box_seal_open(plain, (int)sizeof(plain), sealed, sealedlen, bpk, 32, bsk, 32);
+    CHECK(r == 7 && memcmp(plain, msg, 7) == 0, "seal round trip to B recovers plaintext");
+    CHECK(sxt_box_seal_open(plain, (int)sizeof(plain), sealed, sealedlen, cpk, 32, csk, 32)
+              == SXT_ERR_AUTH,
+          "seal open with the wrong keypair -> SXT_ERR_AUTH");
+}
+
 int main(void)
 {
     printf("SodiumXT smoke test\n");
@@ -607,6 +699,8 @@ int main(void)
     test_pwhash();
     test_secretstream();
     test_file_helpers();
+    test_sign();
+    test_box();
 
     printf("-------------------\n");
     if (g_failures == 0) {

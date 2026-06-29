@@ -1259,3 +1259,389 @@ SXT_API int SXT_CALL sxt_decrypt_file(const char *src_path, const char *dst_path
     }
     return rc;
 }
+
+/* ========================================================================== *
+ * Phase 4: public-key boxes (X25519) + signatures (ed25519).
+ * ========================================================================== */
+
+SXT_API int SXT_CALL sxt_box_publickeybytes(void) { return (int)crypto_box_PUBLICKEYBYTES; }
+SXT_API int SXT_CALL sxt_box_secretkeybytes(void) { return (int)crypto_box_SECRETKEYBYTES; }
+SXT_API int SXT_CALL sxt_box_noncebytes(void)     { return (int)crypto_box_NONCEBYTES; }
+SXT_API int SXT_CALL sxt_box_macbytes(void)       { return (int)crypto_box_MACBYTES; }
+SXT_API int SXT_CALL sxt_box_sealbytes(void)      { return (int)crypto_box_SEALBYTES; }
+
+SXT_API int SXT_CALL sxt_box_keypair(unsigned char *pk_out, int pk_cap,
+                                     unsigned char *sk_out, int sk_cap)
+{
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (pk_cap < (int)crypto_box_PUBLICKEYBYTES || sk_cap < (int)crypto_box_SECRETKEYBYTES) {
+        set_error("sxt_box_keypair: output buffer too small");
+        return SXT_ERR_BADARG;
+    }
+    if (pk_out == NULL || sk_out == NULL) {
+        set_error("sxt_box_keypair: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    crypto_box_keypair(pk_out, sk_out);
+    return SXT_OK;
+}
+
+SXT_API int SXT_CALL sxt_box(unsigned char *out, int cap,
+                             const unsigned char *msg, int msglen,
+                             const unsigned char *recipient_pk, int pklen,
+                             const unsigned char *sender_sk, int sklen)
+{
+    const int noncebytes = (int)crypto_box_NONCEBYTES;
+    const int macbytes = (int)crypto_box_MACBYTES;
+    int needed;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (msglen < 0) {
+        set_error("sxt_box: negative length");
+        return SXT_ERR_BADARG;
+    }
+    if (pklen != (int)crypto_box_PUBLICKEYBYTES || sklen != (int)crypto_box_SECRETKEYBYTES) {
+        set_error("sxt_box: wrong key length");
+        return SXT_ERR_BADARG;
+    }
+    if (msglen > SXT_MAX_BUFFER - noncebytes - macbytes) {
+        set_error("sxt_box: message too large for a single buffer");
+        return SXT_ERR_BADARG;
+    }
+    needed = noncebytes + msglen + macbytes;
+    if (cap < needed) {
+        return -needed;
+    }
+    if (out == NULL || recipient_pk == NULL || sender_sk == NULL) {
+        set_error("sxt_box: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (msglen > 0 && msg == NULL) {
+        set_error("sxt_box: null message");
+        return SXT_ERR_BADARG;
+    }
+    randombytes_buf(out, (size_t)noncebytes);
+    if (crypto_box_easy(out + noncebytes, msg, (unsigned long long)msglen,
+                        out, recipient_pk, sender_sk) != 0) {
+        set_error("sxt_box: encryption failed");
+        return SXT_ERR_BADARG;
+    }
+    return needed;
+}
+
+SXT_API int SXT_CALL sxt_box_open(unsigned char *out, int cap,
+                                  const unsigned char *box, int boxlen,
+                                  const unsigned char *sender_pk, int pklen,
+                                  const unsigned char *recipient_sk, int sklen)
+{
+    const int noncebytes = (int)crypto_box_NONCEBYTES;
+    const int macbytes = (int)crypto_box_MACBYTES;
+    int plainlen;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (pklen != (int)crypto_box_PUBLICKEYBYTES || sklen != (int)crypto_box_SECRETKEYBYTES) {
+        set_error("sxt_box_open: wrong key length");
+        return SXT_ERR_BADARG;
+    }
+    if (boxlen < noncebytes + macbytes) {
+        set_error("sxt_box_open: ciphertext too short");
+        return SXT_ERR_BADARG;
+    }
+    plainlen = boxlen - noncebytes - macbytes;
+    if (cap < plainlen) {
+        return -plainlen;
+    }
+    if (box == NULL || sender_pk == NULL || recipient_sk == NULL) {
+        set_error("sxt_box_open: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (plainlen > 0 && out == NULL) {
+        set_error("sxt_box_open: null output buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (crypto_box_open_easy(out, box + noncebytes,
+                             (unsigned long long)(boxlen - noncebytes),
+                             box, sender_pk, recipient_sk) != 0) {
+        set_error("sxt_box_open: wrong key or tampered data");
+        return SXT_ERR_AUTH;
+    }
+    return plainlen;
+}
+
+SXT_API int SXT_CALL sxt_box_seal(unsigned char *out, int cap,
+                                  const unsigned char *msg, int msglen,
+                                  const unsigned char *recipient_pk, int pklen)
+{
+    const int sealbytes = (int)crypto_box_SEALBYTES;
+    int needed;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (msglen < 0) {
+        set_error("sxt_box_seal: negative length");
+        return SXT_ERR_BADARG;
+    }
+    if (pklen != (int)crypto_box_PUBLICKEYBYTES) {
+        set_error("sxt_box_seal: wrong public key length");
+        return SXT_ERR_BADARG;
+    }
+    if (msglen > SXT_MAX_BUFFER - sealbytes) {
+        set_error("sxt_box_seal: message too large for a single buffer");
+        return SXT_ERR_BADARG;
+    }
+    needed = msglen + sealbytes;
+    if (cap < needed) {
+        return -needed;
+    }
+    if (out == NULL || recipient_pk == NULL) {
+        set_error("sxt_box_seal: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (msglen > 0 && msg == NULL) {
+        set_error("sxt_box_seal: null message");
+        return SXT_ERR_BADARG;
+    }
+    if (crypto_box_seal(out, msg, (unsigned long long)msglen, recipient_pk) != 0) {
+        set_error("sxt_box_seal: sealing failed");
+        return SXT_ERR_BADARG;
+    }
+    return needed;
+}
+
+SXT_API int SXT_CALL sxt_box_seal_open(unsigned char *out, int cap,
+                                       const unsigned char *sealed, int sealedlen,
+                                       const unsigned char *recipient_pk, int pklen,
+                                       const unsigned char *recipient_sk, int sklen)
+{
+    const int sealbytes = (int)crypto_box_SEALBYTES;
+    int plainlen;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (pklen != (int)crypto_box_PUBLICKEYBYTES || sklen != (int)crypto_box_SECRETKEYBYTES) {
+        set_error("sxt_box_seal_open: wrong key length");
+        return SXT_ERR_BADARG;
+    }
+    if (sealedlen < sealbytes) {
+        set_error("sxt_box_seal_open: sealed box too short");
+        return SXT_ERR_BADARG;
+    }
+    plainlen = sealedlen - sealbytes;
+    if (cap < plainlen) {
+        return -plainlen;
+    }
+    if (sealed == NULL || recipient_pk == NULL || recipient_sk == NULL) {
+        set_error("sxt_box_seal_open: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (plainlen > 0 && out == NULL) {
+        set_error("sxt_box_seal_open: null output buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (crypto_box_seal_open(out, sealed, (unsigned long long)sealedlen,
+                             recipient_pk, recipient_sk) != 0) {
+        set_error("sxt_box_seal_open: wrong key or tampered data");
+        return SXT_ERR_AUTH;
+    }
+    return plainlen;
+}
+
+/* ---- ed25519 signatures ------------------------------------------------- */
+
+SXT_API int SXT_CALL sxt_sign_publickeybytes(void) { return (int)crypto_sign_PUBLICKEYBYTES; }
+SXT_API int SXT_CALL sxt_sign_secretkeybytes(void) { return (int)crypto_sign_SECRETKEYBYTES; }
+SXT_API int SXT_CALL sxt_sign_bytes(void)          { return (int)crypto_sign_BYTES; }
+SXT_API int SXT_CALL sxt_sign_seedbytes(void)      { return (int)crypto_sign_SEEDBYTES; }
+
+SXT_API int SXT_CALL sxt_sign_keypair(unsigned char *pk_out, int pk_cap,
+                                      unsigned char *sk_out, int sk_cap)
+{
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (pk_cap < (int)crypto_sign_PUBLICKEYBYTES || sk_cap < (int)crypto_sign_SECRETKEYBYTES) {
+        set_error("sxt_sign_keypair: output buffer too small");
+        return SXT_ERR_BADARG;
+    }
+    if (pk_out == NULL || sk_out == NULL) {
+        set_error("sxt_sign_keypair: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    crypto_sign_keypair(pk_out, sk_out);
+    return SXT_OK;
+}
+
+SXT_API int SXT_CALL sxt_sign_keypair_from_seed(unsigned char *pk_out, int pk_cap,
+                                                unsigned char *sk_out, int sk_cap,
+                                                const unsigned char *seed, int seedlen)
+{
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (seedlen != (int)crypto_sign_SEEDBYTES) {
+        set_error("sxt_sign_keypair_from_seed: wrong seed length");
+        return SXT_ERR_BADARG;
+    }
+    if (pk_cap < (int)crypto_sign_PUBLICKEYBYTES || sk_cap < (int)crypto_sign_SECRETKEYBYTES) {
+        set_error("sxt_sign_keypair_from_seed: output buffer too small");
+        return SXT_ERR_BADARG;
+    }
+    if (pk_out == NULL || sk_out == NULL || seed == NULL) {
+        set_error("sxt_sign_keypair_from_seed: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    crypto_sign_seed_keypair(pk_out, sk_out, seed);
+    return SXT_OK;
+}
+
+SXT_API int SXT_CALL sxt_sign_detached(unsigned char *sig_out, int sig_cap,
+                                       const unsigned char *msg, int msglen,
+                                       const unsigned char *sk, int sklen)
+{
+    const int sigbytes = (int)crypto_sign_BYTES;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (msglen < 0) {
+        set_error("sxt_sign_detached: negative length");
+        return SXT_ERR_BADARG;
+    }
+    if (sklen != (int)crypto_sign_SECRETKEYBYTES) {
+        set_error("sxt_sign_detached: wrong secret key length");
+        return SXT_ERR_BADARG;
+    }
+    if (sig_cap < sigbytes) {
+        return -sigbytes;
+    }
+    if (sig_out == NULL || sk == NULL) {
+        set_error("sxt_sign_detached: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (msglen > 0 && msg == NULL) {
+        set_error("sxt_sign_detached: null message");
+        return SXT_ERR_BADARG;
+    }
+    if (crypto_sign_detached(sig_out, NULL, msg, (unsigned long long)msglen, sk) != 0) {
+        set_error("sxt_sign_detached: signing failed");
+        return SXT_ERR_BADARG;
+    }
+    return sigbytes;
+}
+
+SXT_API int SXT_CALL sxt_sign_verify_detached(const unsigned char *sig, int siglen,
+                                              const unsigned char *msg, int msglen,
+                                              const unsigned char *pk, int pklen)
+{
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return 0;
+    }
+    /* Any malformed input cannot be a valid signature, so it is a clean 0, never
+     * an error in the band. */
+    if (siglen != (int)crypto_sign_BYTES || pklen != (int)crypto_sign_PUBLICKEYBYTES) {
+        return 0;
+    }
+    if (msglen < 0 || sig == NULL || pk == NULL || (msglen > 0 && msg == NULL)) {
+        return 0;
+    }
+    return crypto_sign_verify_detached(sig, msg, (unsigned long long)msglen, pk) == 0 ? 1 : 0;
+}
+
+SXT_API int SXT_CALL sxt_sign(unsigned char *out, int cap,
+                              const unsigned char *msg, int msglen,
+                              const unsigned char *sk, int sklen)
+{
+    const int sigbytes = (int)crypto_sign_BYTES;
+    int needed;
+    unsigned long long slen = 0;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (msglen < 0) {
+        set_error("sxt_sign: negative length");
+        return SXT_ERR_BADARG;
+    }
+    if (sklen != (int)crypto_sign_SECRETKEYBYTES) {
+        set_error("sxt_sign: wrong secret key length");
+        return SXT_ERR_BADARG;
+    }
+    if (msglen > SXT_MAX_BUFFER - sigbytes) {
+        set_error("sxt_sign: message too large for a single buffer");
+        return SXT_ERR_BADARG;
+    }
+    needed = sigbytes + msglen;
+    if (cap < needed) {
+        return -needed;
+    }
+    if (out == NULL || sk == NULL) {
+        set_error("sxt_sign: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (msglen > 0 && msg == NULL) {
+        set_error("sxt_sign: null message");
+        return SXT_ERR_BADARG;
+    }
+    if (crypto_sign(out, &slen, msg, (unsigned long long)msglen, sk) != 0) {
+        set_error("sxt_sign: signing failed");
+        return SXT_ERR_BADARG;
+    }
+    return (int)slen;
+}
+
+SXT_API int SXT_CALL sxt_sign_open(unsigned char *out, int cap,
+                                   const unsigned char *signed_msg, int signedlen,
+                                   const unsigned char *pk, int pklen)
+{
+    const int sigbytes = (int)crypto_sign_BYTES;
+    int maxmsg;
+    unsigned long long mlen = 0;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (pklen != (int)crypto_sign_PUBLICKEYBYTES) {
+        set_error("sxt_sign_open: wrong public key length");
+        return SXT_ERR_BADARG;
+    }
+    if (signedlen < sigbytes) {
+        set_error("sxt_sign_open: signed message too short");
+        return SXT_ERR_BADARG;
+    }
+    maxmsg = signedlen - sigbytes;
+    if (cap < maxmsg) {
+        return -maxmsg;
+    }
+    if (signed_msg == NULL || pk == NULL) {
+        set_error("sxt_sign_open: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (maxmsg > 0 && out == NULL) {
+        set_error("sxt_sign_open: null output buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (crypto_sign_open(out, &mlen, signed_msg, (unsigned long long)signedlen, pk) != 0) {
+        set_error("sxt_sign_open: bad signature");
+        return SXT_ERR_AUTH;
+    }
+    return (int)mlen;
+}
