@@ -39,10 +39,24 @@ silent drift fails loudly). libsodium's own build is autotools; on Linux and
 macOS CMake drives `./configure --enable-static --disable-shared --with-pic`
 through `ExternalProject`, then imports the resulting `libsodium.a`.
 
-> Windows / MSVC: not wired up yet. `CMakeLists.txt` raises a clear
-> `FATAL_ERROR` on MSVC rather than guessing a build path. Settling this (the
-> bundled `builds/msvc` solution, or vcpkg) is the one remaining Phase 0 CI
-> task (plan Risk #6).
+> Windows / MSVC links libsodium from **vcpkg** instead of building the pinned
+> source: install `libsodium:<triplet>-static` and pass the vcpkg toolchain (see
+> "Build and test (Windows)" below). The CI matrix builds all five platforms.
+
+## Where the built library lands
+
+A plain `cmake --build` now copies the freshly built library into the bundle
+location the packaged extension reads:
+
+```
+src/code/<arch>-<platform>/sodiumxt.{so,dll,dylib}
+```
+
+so the engine can resolve `c:sodiumxt>` with no extra step. The platform id is
+detected automatically (architecture-first; Windows is `-win32` for both
+bitnesses; macOS files under `universal-mac`); override it for a cross build with
+`-DSODIUMXT_PLATFORM_ID=<id>`, or turn the copy off with
+`-DSODIUMXT_PLACE_IN_SRC=OFF`.
 
 ## Build and test (Linux, macOS)
 
@@ -50,10 +64,35 @@ through `ExternalProject`, then imports the resulting `libsodium.a`.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSODIUMXT_BUILD_TESTS=ON
 cmake --build build --config Release
 ctest --test-dir build --output-on-failure        # sodium_smoke_test (KATs + round trip)
+# -> build also wrote src/code/<arch>-<platform>/sodiumxt.{so,dylib}
 ```
 
 The first build downloads and compiles libsodium (a couple of minutes); later
 builds reuse it.
+
+## Build and test (Windows / MSVC)
+
+Windows links libsodium from vcpkg. From a Developer PowerShell (so `cl.exe` is
+on PATH), with `VCPKG_INSTALLATION_ROOT` set to your vcpkg checkout:
+
+```powershell
+vcpkg install libsodium:x64-windows-static          # or x86-windows-static for 32-bit
+
+cmake -S . -B build -G "NMake Makefiles" `
+  -DCMAKE_BUILD_TYPE=Release `
+  -DSODIUMXT_BUILD_TESTS=ON `
+  -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+  -DVCPKG_TARGET_TRIPLET=x64-windows-static
+cmake --build build
+ctest --test-dir build --output-on-failure
+# -> build also wrote src\code\x86_64-win32\sodiumxt.dll
+```
+
+The `NMake Makefiles` generator avoids the Visual Studio generator's VS-instance
+detection (which can fail on minimal runners) and gives a native `cl.exe` for the
+architecture of the Developer shell you launched. Use the `x86-windows-static`
+triplet from a 32-bit Developer shell to produce the `x86-win32` `.dll`.
 
 ## Always iterate under the sanitizers
 
@@ -94,19 +133,28 @@ runtime behaviour of the `.lcb` you cannot observe here.
 
 ## Packaging the native library
 
-After any native edit, refresh the committed binary for your platform in the
-same change:
+`cmake --build` already copies the library into
+`src/code/<arch>-<platform>/sodiumxt.{so,dll,dylib}` (see "Where the built
+library lands"), so after a build it is in place. To track it in the repo for
+your platform, in the same change as the native edit:
+
+```sh
+git add src/code/<arch>-<platform>/sodiumxt.*
+```
+
+If you have a build tree you do not want to reconfigure (or want to copy from a
+build dir that did not run the post-build step, e.g. one built with
+`-DSODIUMXT_PLACE_IN_SRC=OFF`), do the same copy explicitly:
 
 ```sh
 python3 tools/package-extension.py --build-dir build
 # -> src/code/<arch>-<platform>/sodiumxt.{so,dll,dylib}
-git add src/code/<arch>-<platform>/sodiumxt.*
 ```
 
 Platform ids are architecture-first, and Windows is `-win32` for both bitnesses:
 `x86_64-linux`, `x86-linux`, `x86_64-win32`, `x86-win32`, `universal-mac`. CI
-builds and tests the full matrix; the script handles the one platform you are
-on.
+builds and tests the full matrix; the build (and the script) handle the one
+platform you are on.
 
 ## What "done" means
 

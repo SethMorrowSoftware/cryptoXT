@@ -61,12 +61,15 @@ real OXT compile. See the banner at the top of `src/sodium.lcb`.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSODIUMXT_BUILD_TESTS=ON
-cmake --build build --config Release
+cmake --build build --config Release        # also writes src/code/<arch>-<platform>/sodiumxt.<ext>
 ctest --test-dir build --output-on-failure
 python3 tools/check-livecodescript.py
 ```
 
-See `docs/building.md` for the sanitizer build and packaging.
+The build copies the library into `src/code/<arch>-<platform>/` itself, so the
+packaged extension can resolve `c:sodiumxt>` with no extra step. On Windows,
+link libsodium from vcpkg; see `docs/building.md` for the exact MSVC invocation,
+the sanitizer build, and packaging.
 
 ## Native libraries (CI)
 
