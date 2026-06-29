@@ -42,8 +42,9 @@ function sxSelfTest
    testSeal
    testKeyExchange
    testPadding
+   testHashExtras
 
-   put return & "----" & return into sLog after sLog
+   put return & "----" & return after sLog
    put "PASSED:" && sPass & "   FAILED:" && sFail after sLog
    return sLog
 end sxSelfTest
@@ -318,3 +319,38 @@ on testPadding
    sxCheck (the number of bytes in tPadded is 16), "pad rounds 5 bytes up to 16"
    sxCheck (textDecode(sxUnpad(tPadded, 16), "utf-8") is "hello"), "unpad recovers the original"
 end testPadding
+
+on testHashExtras
+   local tInRange
+   local tR
+   local tH
+   local tStream
+   local tPath
+   local tContent
+   sxSection "phase 6 (uniform random, multipart hash, file hash)"
+   -- uniform random stays in range
+   put true into tInRange
+   repeat 200 times
+      put sxRandomUniform(6) into tR
+      if tR < 0 or tR >= 6 then
+         put false into tInRange
+      end if
+   end repeat
+   sxCheck tInRange, "sxRandomUniform(6) stays in [0,6)"
+   -- multipart "a" + "b" + "c" equals the one-shot BLAKE2b-256("abc") vector
+   put sxHashInit(32) into tH
+   sxHashUpdate tH, sxUtf8("a")
+   sxHashUpdate tH, sxUtf8("b")
+   sxHashUpdate tH, sxUtf8("c")
+   put sxHashFinal(tH, 32) into tStream
+   sxCheck (sxHexOf(tStream) is \
+      "bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319"), \
+      "multipart hash of a|b|c matches BLAKE2b-256(abc)"
+   -- a file hash equals the one-shot hash of the same bytes
+   put specialFolderPath("temporary") & "/sxt_hashfile.bin" into tPath
+   put sxRandomBytes(40000) into tContent
+   put tContent into url ("binfile:" & tPath)
+   sxCheck (sxHashFile(tPath, 32) is sxHash(tContent, 32)), \
+      "sxHashFile matches the one-shot hash of the same bytes"
+   delete file tPath
+end testHashExtras

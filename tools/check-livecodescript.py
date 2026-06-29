@@ -275,6 +275,24 @@ def check_lcb_imports(path, stripped_lines, problems):
             f"module; keep text<->Data conversion in script or pass Data"))
 
 
+def check_put_prepositions(path, stripped_lines, problems):
+    """A `put` takes `into` OR `after`/`before`, never both. `put X into Y after Y`
+    is malformed: the engine rejects the stray preposition ("can't find handler"
+    / hint 'after'). This is statically catchable, so catch it before an OXT
+    cycle does. Runs on string-stripped lines, so a literal 'after'/'into' inside
+    a quoted string never trips it."""
+    for lineno, sline in enumerate(stripped_lines, start=1):
+        m = re.match(r"\s*(?:then\s+)?put\b(.*)", sline)
+        if not m:
+            continue
+        rest = m.group(1)
+        if re.search(r"\binto\b", rest) and re.search(r"\b(?:after|before)\b", rest):
+            problems.append(Problem(
+                path, lineno,
+                "a `put` uses both `into` and `after`/`before`; use one "
+                "(`put X into Y` to replace, or `put X after Y` to append)"))
+
+
 def check_file(path, problems):
     with open(path, "r", encoding="utf-8") as handle:
         text = handle.read()
@@ -287,6 +305,7 @@ def check_file(path, problems):
     check_balance(path, stripped_lines, is_script, problems)
     check_constants_before_use(path, stripped_lines, problems)
     check_shadow_trap(path, stripped_lines, problems)
+    check_put_prepositions(path, stripped_lines, problems)
     if not is_script:
         check_lcb_imports(path, stripped_lines, problems)
 

@@ -779,6 +779,117 @@ static void test_pad(void)
     CHECK(sxt_pad(buf, 4, msg, 5, 16) == -16, "too-small pad buffer -> -needed (16)");
 }
 
+/* ========================================================================== *
+ * Phase 6: streaming / whole-file hashing + unbiased random.
+ * ========================================================================== */
+
+static int digest_is(const unsigned char *dig, int outlen, const char *expected_hex)
+{
+    char hex[2 * 64 + 1];
+    if (outlen < 0 || outlen > 64) {
+        return 0;
+    }
+    if (sxt_bin2hex(hex, (int)sizeof(hex), dig, outlen) != outlen * 2) {
+        return 0;
+    }
+    return strcmp(hex, expected_hex) == 0;
+}
+
+static void test_phase6(void)
+{
+    /* The same published BLAKE2b-256("abc") vector used in test_hashing, so the
+     * multipart and file paths are pinned to a known answer, not just to each
+     * other. */
+    static const char *KAT_ABC_256 =
+        "bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319";
+    static unsigned char bigbuf[40000];
+    const char *fpath = "sxt_hashfile.tmp";
+    unsigned char dig[64];
+    unsigned char dig2[64];
+    unsigned char key[32];
+    int h, i, r, in_range;
+    FILE *f;
+
+    printf("phase 6 (uniform random, multipart hash, file hash):\n");
+    memset(key, 0x42, sizeof(key));
+
+    /* --- randombytes_uniform: stays in range, and the firewall --- */
+    in_range = 1;
+    for (i = 0; i < 4096; i++) {
+        r = sxt_randombytes_uniform(10);
+        if (r < 0 || r >= 10) { in_range = 0; break; }
+    }
+    CHECK(in_range, "randombytes_uniform(10) stays in [0,10) over 4096 draws");
+    CHECK(sxt_randombytes_uniform(1) == 0, "uniform(1) is always 0");
+    CHECK(sxt_randombytes_uniform(0) == SXT_ERR_BADARG, "uniform(0) -> BADARG");
+    CHECK(sxt_randombytes_uniform(-5) == SXT_ERR_BADARG, "uniform(negative) -> BADARG");
+    CHECK(sxt_randombytes_uniform(SXT_MAX_BUFFER + 1) == SXT_ERR_BADARG,
+          "uniform(> SXT_MAX_BUFFER) -> BADARG");
+
+    /* --- multipart hash: "a"+"b"+"c" == BLAKE2b-256("abc") --- */
+    h = sxt_hash_init(NULL, 0, 32);
+    CHECK(h > 0, "hash_init returns a positive handle");
+    CHECK(sxt_hash_update(h, (const unsigned char *)"a", 1) == SXT_OK, "update 'a'");
+    CHECK(sxt_hash_update(h, (const unsigned char *)"b", 1) == SXT_OK, "update 'b'");
+    CHECK(sxt_hash_update(h, (const unsigned char *)"c", 1) == SXT_OK, "update 'c'");
+    CHECK(sxt_hash_final(h, dig, 8) == -32, "short final buffer -> -needed (32), state intact");
+    CHECK(sxt_hash_final(h, dig, 32) == 32, "final writes 32 bytes");
+    CHECK(digest_is(dig, 32, KAT_ABC_256), "multipart BLAKE2b-256(abc) matches the vector");
+    CHECK(sxt_hash_update(h, (const unsigned char *)"x", 1) == SXT_ERR_BADHANDLE,
+          "update after final -> BADHANDLE (handle released)");
+    CHECK(sxt_hash_final(h, dig, 32) == SXT_ERR_BADHANDLE, "final after final -> BADHANDLE");
+
+    /* abort path: init then free, no final; idempotent free must not crash. */
+    h = sxt_hash_init(NULL, 0, 32);
+    CHECK(h > 0, "hash_init (abort path) handle");
+    sxt_hash_free(h);
+    CHECK(sxt_hash_update(h, (const unsigned char *)"x", 1) == SXT_ERR_BADHANDLE,
+          "update after free -> BADHANDLE");
+    sxt_hash_free(h);
+    CHECK(1, "double free is a harmless no-op");
+
+    /* bogus handles, including a stream-style handle that lacks the hash tag. */
+    CHECK(sxt_hash_update(0, (const unsigned char *)"x", 1) == SXT_ERR_BADHANDLE,
+          "update on handle 0 -> BADHANDLE");
+    CHECK(sxt_hash_final(65537, dig2, 32) == SXT_ERR_BADHANDLE,
+          "final on an untagged (stream-style) handle -> BADHANDLE");
+
+    /* keyed multipart differs from the unkeyed digest still in dig. */
+    h = sxt_hash_init(key, 32, 32);
+    CHECK(h > 0, "keyed hash_init");
+    sxt_hash_update(h, (const unsigned char *)"abc", 3);
+    CHECK(sxt_hash_final(h, dig2, 32) == 32, "keyed final writes 32 bytes");
+    CHECK(memcmp(dig, dig2, 32) != 0, "keyed multipart differs from unkeyed");
+
+    /* --- file hash: a file of "abc" == BLAKE2b-256("abc") --- */
+    f = fopen(fpath, "wb");
+    CHECK(f != NULL, "open temp file for write");
+    if (f != NULL) {
+        fwrite("abc", 1, 3, f);
+        fclose(f);
+    }
+    CHECK(sxt_hash_file(fpath, dig, 64, 32, NULL, 0) == 32, "hash_file returns 32");
+    CHECK(digest_is(dig, 32, KAT_ABC_256), "hash_file BLAKE2b-256(abc) matches the vector");
+    CHECK(sxt_hash_file(fpath, dig2, 64, 32, key, 32) == 32, "keyed hash_file returns 32");
+    CHECK(memcmp(dig, dig2, 32) != 0, "keyed file hash differs from unkeyed");
+    CHECK(sxt_hash_file(fpath, dig, 8, 32, NULL, 0) == -32, "short hash_file buffer -> -needed (32)");
+    CHECK(sxt_hash_file("sxt_no_such_file.tmp", dig, 64, 32, NULL, 0) == SXT_ERR_IO,
+          "missing file -> SXT_ERR_IO");
+    remove(fpath);
+
+    /* A multi-chunk file (> SXT_FILE_CHUNK) must hash identically to a one-shot
+     * hash of the same bytes: proves the chunked read loop is correct. */
+    CHECK(write_pattern_file(fpath, 40000), "wrote a 40000-byte file (multi-chunk)");
+    f = fopen(fpath, "rb");
+    CHECK(f != NULL && fread(bigbuf, 1, sizeof(bigbuf), f) == sizeof(bigbuf),
+          "read the 40000-byte pattern back");
+    if (f != NULL) { fclose(f); }
+    CHECK(sxt_hash_file(fpath, dig, 64, 32, NULL, 0) == 32, "hash_file (40000 bytes) returns 32");
+    CHECK(sxt_generichash(dig2, 64, 32, bigbuf, 40000, NULL, 0) == 32, "one-shot hash of same bytes");
+    CHECK(memcmp(dig, dig2, 32) == 0, "file hash equals the one-shot hash of the same bytes");
+    remove(fpath);
+}
+
 int main(void)
 {
     printf("SodiumXT smoke test\n");
@@ -801,6 +912,7 @@ int main(void)
     test_kdf();
     test_kx();
     test_pad();
+    test_phase6();
 
     printf("-------------------\n");
     if (g_failures == 0) {
