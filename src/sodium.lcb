@@ -101,7 +101,11 @@ foreign handler _sxt_abi_version() returns CInt binds to "c:sodiumxt>sxt_abi_ver
 foreign handler _sxt_last_error(in pOut as Pointer, in pCap as CInt) returns CInt binds to "c:sodiumxt>sxt_last_error"
 foreign handler _sxt_randombytes(in pOut as Pointer, in pCap as CInt, in pCount as CInt) returns CInt binds to "c:sodiumxt>sxt_randombytes"
 
-foreign handler _sxt_generichash(in pOut as Pointer, in pCap as CInt, in pOutLen as CInt, in pIn as Pointer, in pInLen as CInt, in pKey as Pointer, in pKeyLen as CInt) returns CInt binds to "c:sodiumxt>sxt_generichash"
+-- pKey is `optional Pointer` so the unkeyed hash can pass `nothing` as a C NULL:
+-- a plain `Pointer` parameter rejects `nothing` ("not of correct type"), and
+-- `optional` is the LCB-sanctioned way to marshal a null pointer. The C side
+-- treats key==NULL with keylen==0 as unkeyed (BLAKE2b), so the ABI is unchanged.
+foreign handler _sxt_generichash(in pOut as Pointer, in pCap as CInt, in pOutLen as CInt, in pIn as Pointer, in pInLen as CInt, in pKey as optional Pointer, in pKeyLen as CInt) returns CInt binds to "c:sodiumxt>sxt_generichash"
 foreign handler _sxt_bin2hex(in pOut as Pointer, in pCap as CInt, in pIn as Pointer, in pInLen as CInt) returns CInt binds to "c:sodiumxt>sxt_bin2hex"
 foreign handler _sxt_hex2bin(in pOut as Pointer, in pCap as CInt, in pHex as Pointer, in pHexLen as CInt) returns CInt binds to "c:sodiumxt>sxt_hex2bin"
 foreign handler _sxt_bin2base64(in pOut as Pointer, in pCap as CInt, in pIn as Pointer, in pInLen as CInt, in pVariant as CInt) returns CInt binds to "c:sodiumxt>sxt_bin2base64"
