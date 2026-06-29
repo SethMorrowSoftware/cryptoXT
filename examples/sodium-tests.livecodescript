@@ -43,7 +43,7 @@ function sxSelfTest
    testKeyExchange
    testPadding
 
-   put return & "----" & return into sLog after sLog
+   put return & "----" & return after sLog
    put "PASSED:" && sPass & "   FAILED:" && sFail after sLog
    return sLog
 end sxSelfTest
