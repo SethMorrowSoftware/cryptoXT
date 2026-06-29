@@ -682,6 +682,78 @@ static void test_box(void)
           "seal open with the wrong keypair -> SXT_ERR_AUTH");
 }
 
+/* ========================================================================== *
+ * Phase 5: key derivation (kdf), key exchange (kx), padding.
+ * ========================================================================== */
+
+static void test_kdf(void)
+{
+    unsigned char master[32];
+    unsigned char sub[32];
+    char hex[2 * 32 + 1];
+
+    printf("kdf (deterministic subkey derivation):\n");
+    memset(master, 0x01, sizeof(master));
+
+    CHECK(sxt_kdf_derive(sub, 32, 32, "1", (const unsigned char *)"SXTctx00", 8, master, 32) == 32,
+          "kdf_derive produces a 32-byte subkey");
+    sxt_bin2hex(hex, (int)sizeof(hex), sub, 32);
+    CHECK(strcmp(hex, "dc9d1a0879b1884c4cafbc2a68d1b22926e8a6a0043f458c7f1bc370b032058f") == 0,
+          "kdf subkey (master=01x32, id=1, ctx=SXTctx00) matches the KAT");
+
+    /* a different id gives a different subkey */
+    {
+        unsigned char sub2[32];
+        CHECK(sxt_kdf_derive(sub2, 32, 32, "2", (const unsigned char *)"SXTctx00", 8, master, 32) == 32,
+              "kdf_derive with a different id succeeds");
+        CHECK(memcmp(sub, sub2, 32) != 0, "different subkey ids give different subkeys");
+    }
+    CHECK(sxt_kdf_derive(sub, 32, 32, "1", (const unsigned char *)"short", 5, master, 32)
+              == SXT_ERR_BADARG,
+          "wrong context length -> BADARG");
+}
+
+static void test_kx(void)
+{
+    unsigned char cpk[32], csk[32];
+    unsigned char spk[32], ssk[32];
+    unsigned char crx[32], ctx[32];
+    unsigned char srx[32], stx[32];
+
+    printf("kx (key exchange agreement):\n");
+    CHECK(sxt_kx_keypair(cpk, 32, csk, 32) == SXT_OK, "client keypair");
+    CHECK(sxt_kx_keypair(spk, 32, ssk, 32) == SXT_OK, "server keypair");
+
+    CHECK(sxt_kx_client_session_keys(crx, 32, ctx, 32, cpk, 32, csk, 32, spk, 32) == SXT_OK,
+          "client session keys");
+    CHECK(sxt_kx_server_session_keys(srx, 32, stx, 32, spk, 32, ssk, 32, cpk, 32) == SXT_OK,
+          "server session keys");
+
+    CHECK(memcmp(crx, stx, 32) == 0, "client rx equals server tx");
+    CHECK(memcmp(ctx, srx, 32) == 0, "client tx equals server rx");
+}
+
+static void test_pad(void)
+{
+    unsigned char buf[32];
+    const unsigned char msg[5] = {'h', 'e', 'l', 'l', 'o'};
+    int padded;
+
+    printf("pad / unpad (length hiding):\n");
+
+    padded = sxt_pad(buf, (int)sizeof(buf), msg, 5, 16);
+    CHECK(padded == 16, "pad(5, blocksize 16) -> 16 bytes");
+    CHECK(memcmp(buf, msg, 5) == 0, "padded buffer starts with the original data");
+    CHECK(sxt_unpad(buf, padded, 16) == 5, "unpad recovers the original length");
+
+    /* malformed padding -> ENCODING; a too-small buffer -> -needed. The padding
+     * is a 0x80 marker (here at buf[5]) followed by zeros; erase it so there is
+     * no valid marker in the final block. */
+    memset(&buf[5], 0, 11);
+    CHECK(sxt_unpad(buf, 16, 16) == SXT_ERR_ENCODING, "malformed padding -> SXT_ERR_ENCODING");
+    CHECK(sxt_pad(buf, 4, msg, 5, 16) == -16, "too-small pad buffer -> -needed (16)");
+}
+
 int main(void)
 {
     printf("SodiumXT smoke test\n");
@@ -701,6 +773,9 @@ int main(void)
     test_file_helpers();
     test_sign();
     test_box();
+    test_kdf();
+    test_kx();
+    test_pad();
 
     printf("-------------------\n");
     if (g_failures == 0) {

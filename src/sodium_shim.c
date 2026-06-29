@@ -1645,3 +1645,203 @@ SXT_API int SXT_CALL sxt_sign_open(unsigned char *out, int cap,
     }
     return (int)mlen;
 }
+
+/* ========================================================================== *
+ * Phase 5: key derivation (kdf), key exchange (kx), padding.
+ * ========================================================================== */
+
+SXT_API int SXT_CALL sxt_kdf_keybytes(void)     { return (int)crypto_kdf_KEYBYTES; }
+SXT_API int SXT_CALL sxt_kdf_contextbytes(void) { return (int)crypto_kdf_CONTEXTBYTES; }
+SXT_API int SXT_CALL sxt_kdf_bytes_min(void)    { return (int)crypto_kdf_BYTES_MIN; }
+SXT_API int SXT_CALL sxt_kdf_bytes_max(void)    { return (int)crypto_kdf_BYTES_MAX; }
+
+SXT_API int SXT_CALL sxt_kdf_derive(unsigned char *out, int cap, int subkeylen,
+                                    const char *subkey_id,
+                                    const unsigned char *context, int contextlen,
+                                    const unsigned char *masterkey, int masterkeylen)
+{
+    unsigned long long id = 0;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (subkeylen < (int)crypto_kdf_BYTES_MIN || subkeylen > (int)crypto_kdf_BYTES_MAX) {
+        set_error("sxt_kdf_derive: subkey length out of range");
+        return SXT_ERR_BADARG;
+    }
+    if (contextlen != (int)crypto_kdf_CONTEXTBYTES) {
+        set_error("sxt_kdf_derive: wrong context length");
+        return SXT_ERR_BADARG;
+    }
+    if (masterkeylen != (int)crypto_kdf_KEYBYTES) {
+        set_error("sxt_kdf_derive: wrong master key length");
+        return SXT_ERR_BADARG;
+    }
+    if (parse_u64(subkey_id, &id) != 0) {
+        set_error("sxt_kdf_derive: subkey id is not a valid decimal number");
+        return SXT_ERR_BADARG;
+    }
+    if (cap < subkeylen) {
+        return -subkeylen;
+    }
+    if (out == NULL || context == NULL || masterkey == NULL) {
+        set_error("sxt_kdf_derive: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (crypto_kdf_derive_from_key(out, (size_t)subkeylen, id,
+                                   (const char *)context, masterkey) != 0) {
+        set_error("sxt_kdf_derive: derivation failed");
+        return SXT_ERR_BADARG;
+    }
+    return subkeylen;
+}
+
+SXT_API int SXT_CALL sxt_kx_publickeybytes(void)  { return (int)crypto_kx_PUBLICKEYBYTES; }
+SXT_API int SXT_CALL sxt_kx_secretkeybytes(void)  { return (int)crypto_kx_SECRETKEYBYTES; }
+SXT_API int SXT_CALL sxt_kx_sessionkeybytes(void) { return (int)crypto_kx_SESSIONKEYBYTES; }
+
+SXT_API int SXT_CALL sxt_kx_keypair(unsigned char *pk_out, int pk_cap,
+                                    unsigned char *sk_out, int sk_cap)
+{
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (pk_cap < (int)crypto_kx_PUBLICKEYBYTES || sk_cap < (int)crypto_kx_SECRETKEYBYTES) {
+        set_error("sxt_kx_keypair: output buffer too small");
+        return SXT_ERR_BADARG;
+    }
+    if (pk_out == NULL || sk_out == NULL) {
+        set_error("sxt_kx_keypair: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    crypto_kx_keypair(pk_out, sk_out);
+    return SXT_OK;
+}
+
+SXT_API int SXT_CALL sxt_kx_client_session_keys(unsigned char *rx_out, int rx_cap,
+                                                unsigned char *tx_out, int tx_cap,
+                                                const unsigned char *client_pk, int client_pklen,
+                                                const unsigned char *client_sk, int client_sklen,
+                                                const unsigned char *server_pk, int server_pklen)
+{
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (rx_cap < (int)crypto_kx_SESSIONKEYBYTES || tx_cap < (int)crypto_kx_SESSIONKEYBYTES) {
+        set_error("sxt_kx_client_session_keys: output buffer too small");
+        return SXT_ERR_BADARG;
+    }
+    if (client_pklen != (int)crypto_kx_PUBLICKEYBYTES ||
+        client_sklen != (int)crypto_kx_SECRETKEYBYTES ||
+        server_pklen != (int)crypto_kx_PUBLICKEYBYTES) {
+        set_error("sxt_kx_client_session_keys: wrong key length");
+        return SXT_ERR_BADARG;
+    }
+    if (rx_out == NULL || tx_out == NULL ||
+        client_pk == NULL || client_sk == NULL || server_pk == NULL) {
+        set_error("sxt_kx_client_session_keys: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    /* Returns -1 if the server's public key is unacceptable. */
+    if (crypto_kx_client_session_keys(rx_out, tx_out, client_pk, client_sk, server_pk) != 0) {
+        set_error("sxt_kx_client_session_keys: peer public key rejected");
+        return SXT_ERR_AUTH;
+    }
+    return SXT_OK;
+}
+
+SXT_API int SXT_CALL sxt_kx_server_session_keys(unsigned char *rx_out, int rx_cap,
+                                                unsigned char *tx_out, int tx_cap,
+                                                const unsigned char *server_pk, int server_pklen,
+                                                const unsigned char *server_sk, int server_sklen,
+                                                const unsigned char *client_pk, int client_pklen)
+{
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (rx_cap < (int)crypto_kx_SESSIONKEYBYTES || tx_cap < (int)crypto_kx_SESSIONKEYBYTES) {
+        set_error("sxt_kx_server_session_keys: output buffer too small");
+        return SXT_ERR_BADARG;
+    }
+    if (server_pklen != (int)crypto_kx_PUBLICKEYBYTES ||
+        server_sklen != (int)crypto_kx_SECRETKEYBYTES ||
+        client_pklen != (int)crypto_kx_PUBLICKEYBYTES) {
+        set_error("sxt_kx_server_session_keys: wrong key length");
+        return SXT_ERR_BADARG;
+    }
+    if (rx_out == NULL || tx_out == NULL ||
+        server_pk == NULL || server_sk == NULL || client_pk == NULL) {
+        set_error("sxt_kx_server_session_keys: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (crypto_kx_server_session_keys(rx_out, tx_out, server_pk, server_sk, client_pk) != 0) {
+        set_error("sxt_kx_server_session_keys: peer public key rejected");
+        return SXT_ERR_AUTH;
+    }
+    return SXT_OK;
+}
+
+SXT_API int SXT_CALL sxt_pad(unsigned char *out, int cap,
+                             const unsigned char *in, int inlen, int blocksize)
+{
+    size_t padded_len = 0;
+    int needed;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (inlen < 0 || blocksize <= 0) {
+        set_error("sxt_pad: bad length or block size");
+        return SXT_ERR_BADARG;
+    }
+    /* sodium_pad always adds 1..blocksize bytes, rounding up to a multiple. */
+    if (inlen / blocksize > (SXT_MAX_BUFFER / blocksize) - 1) {
+        set_error("sxt_pad: result too large for a single buffer");
+        return SXT_ERR_BADARG;
+    }
+    needed = (inlen / blocksize + 1) * blocksize;
+    if (cap < needed) {
+        return -needed;
+    }
+    if (out == NULL || (inlen > 0 && in == NULL)) {
+        set_error("sxt_pad: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    /* Place the data, then pad it in place inside the caller's block. */
+    if (inlen > 0) {
+        memcpy(out, in, (size_t)inlen);
+    }
+    if (sodium_pad(&padded_len, out, (size_t)inlen, (size_t)blocksize, (size_t)cap) != 0) {
+        set_error("sxt_pad: padding failed");
+        return SXT_ERR_BADARG;
+    }
+    return (int)padded_len;
+}
+
+SXT_API int SXT_CALL sxt_unpad(const unsigned char *in, int inlen, int blocksize)
+{
+    size_t unpadded_len = 0;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (inlen < 0 || blocksize <= 0) {
+        set_error("sxt_unpad: bad length or block size");
+        return SXT_ERR_BADARG;
+    }
+    if (inlen > 0 && in == NULL) {
+        set_error("sxt_unpad: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (sodium_unpad(&unpadded_len, in, (size_t)inlen, (size_t)blocksize) != 0) {
+        set_error("sxt_unpad: malformed padding");
+        return SXT_ERR_ENCODING;
+    }
+    return (int)unpadded_len;
+}

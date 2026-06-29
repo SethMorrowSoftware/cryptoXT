@@ -397,6 +397,62 @@ SXT_API int SXT_CALL sxt_sign_open(unsigned char *out, int cap,
                                    const unsigned char *signed_msg, int signedlen,
                                    const unsigned char *pk, int pklen);
 
+/* --- Phase 5: key derivation, key exchange, padding ----------------------- */
+
+/* kdf (crypto_kdf, BLAKE2b) length constants. */
+SXT_API int SXT_CALL sxt_kdf_keybytes(void);
+SXT_API int SXT_CALL sxt_kdf_contextbytes(void);
+SXT_API int SXT_CALL sxt_kdf_bytes_min(void);
+SXT_API int SXT_CALL sxt_kdf_bytes_max(void);
+
+/*
+ * Derive subkey number subkey_id (a decimal string: the id is a uint64 and
+ * there is no 64-bit foreign int) from a master key, namespaced by an
+ * 8-byte context. Different (id, context) give independent subkeys from one
+ * master key. subkeylen is in [bytes_min, bytes_max]; master key is keybytes;
+ * context is contextbytes. Returns subkeylen, -needed, or an error.
+ */
+SXT_API int SXT_CALL sxt_kdf_derive(unsigned char *out, int cap, int subkeylen,
+                                    const char *subkey_id,
+                                    const unsigned char *context, int contextlen,
+                                    const unsigned char *masterkey, int masterkeylen);
+
+/* kx (crypto_kx) length constants. */
+SXT_API int SXT_CALL sxt_kx_publickeybytes(void);
+SXT_API int SXT_CALL sxt_kx_secretkeybytes(void);
+SXT_API int SXT_CALL sxt_kx_sessionkeybytes(void);
+
+/*
+ * Key exchange. kx_keypair makes an X25519 keypair. Each side then derives the
+ * SAME pair of session keys: the client's rx equals the server's tx and vice
+ * versa, so rx is for receiving and tx for sending. Two fixed-size outputs, so
+ * these return SXT_OK / SXT_ERR_AUTH (peer public key rejected) / BADARG.
+ */
+SXT_API int SXT_CALL sxt_kx_keypair(unsigned char *pk_out, int pk_cap,
+                                    unsigned char *sk_out, int sk_cap);
+SXT_API int SXT_CALL sxt_kx_client_session_keys(unsigned char *rx_out, int rx_cap,
+                                                unsigned char *tx_out, int tx_cap,
+                                                const unsigned char *client_pk, int client_pklen,
+                                                const unsigned char *client_sk, int client_sklen,
+                                                const unsigned char *server_pk, int server_pklen);
+SXT_API int SXT_CALL sxt_kx_server_session_keys(unsigned char *rx_out, int rx_cap,
+                                                unsigned char *tx_out, int tx_cap,
+                                                const unsigned char *server_pk, int server_pklen,
+                                                const unsigned char *server_sk, int server_sklen,
+                                                const unsigned char *client_pk, int client_pklen);
+
+/*
+ * Length hiding (sodium_pad / sodium_unpad). pad copies in and appends 1..
+ * blocksize padding bytes so the result is a multiple of blocksize (this hides
+ * the exact message length before encryption); it returns the padded length,
+ * -needed, or an error. unpad returns the original unpadded length of a padded
+ * buffer (the caller keeps that many leading bytes), or SXT_ERR_ENCODING if the
+ * padding is malformed. blocksize must be positive.
+ */
+SXT_API int SXT_CALL sxt_pad(unsigned char *out, int cap,
+                             const unsigned char *in, int inlen, int blocksize);
+SXT_API int SXT_CALL sxt_unpad(const unsigned char *in, int inlen, int blocksize);
+
 #ifdef __cplusplus
 }
 #endif
