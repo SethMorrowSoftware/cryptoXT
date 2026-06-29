@@ -1,0 +1,13 @@
+# CMake / build output. The native library is committed under
+# src/code/<arch>-<platform>/ via tools/package-extension.py, NOT from here.
+/build/
+/build-*/
+*.o
+*.obj
+
+# Local scratch
+/tmp/
+
+# Python bytecode
+__pycache__/
+*.pyc

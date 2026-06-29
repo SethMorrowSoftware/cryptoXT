@@ -1,0 +1,6 @@
+# Exported-symbols list for macOS (ld64, passed via -exported_symbols_list).
+# Only the sxt_* C ABI is public; everything pulled in from the static libsodium
+# stays internal. ld64 accepts a trailing-* glob. The leading underscore is the
+# Mach-O symbol-name convention. Keep this in step with the SXT_API surface in
+# src/sodium_shim.h.
+_sxt_*

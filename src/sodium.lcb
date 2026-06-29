@@ -1,0 +1,1185 @@
+-- sodium.lcb - the LiveCode Builder binding for SodiumXT (public sx* surface).
+--
+-- This thin layer sits on top of the C shim (src/sodium_shim.c, ABI sxt_*) and
+-- presents friendly handlers to xTalk. It now covers the full Phase 1-5 surface:
+-- randomness, hashing, encoding, constant-time compare, Argon2id, secretbox,
+-- AEAD, streaming AEAD + file helpers, public-key boxes, ed25519 signatures,
+-- key derivation, key exchange, and padding.
+--
+-- ==========================================================================
+-- NEEDS AN OXT PASS. There is no headless way to compile or run .lcb in this
+-- environment, so this file is "verified statically" only: it passes
+-- tools/check-livecodescript.py (smart quotes/dashes, handler/control/unsafe
+-- balance, constant-before-use, the prefixed-token-shadow trap). The engine
+-- specifics below CANNOT be verified here and must be reconciled, verbatim,
+-- against the proven foreign declarations in our sibling extension TorrentXT
+-- during a real OXT compile:
+--   * the exact <builtin> signatures for MCMemoryAllocate / MCMemoryDeallocate /
+--     MCDataGetByptr / MCDataGetLength / MCDataCreateWithBytes (especially the
+--     integer WIDTH of size/length parameters: a size_t is not a CUInt);
+--   * whether a `use` clause is needed for the foreign types;
+--   * textEncode availability/signature and numeric-to-string coercion via `&`;
+--   * out-parameter call syntax for the keypair / pull handlers.
+-- The native C layer it binds to IS fully tested (KATs + ASan/UBSan); this is
+-- the one layer awaiting an on-engine confirmation. Do not claim runtime
+-- behaviour of this file until that pass is done.
+-- ==========================================================================
+
+library org.openxtalk.library.sodium
+
+metadata version    is "0.1.0"
+metadata author     is "OpenXTalk"
+metadata title      is "SodiumXT"
+metadata summary    is "Modern cryptography for xTalk via libsodium (authenticated encryption, Argon2id, streaming AEAD, X25519, ed25519, BLAKE2b, CSPRNG)."
+
+-- Mirror the C side; keep these in step with src/sodium_shim.h.
+--   kSXTABIVersion == SXT_ABI_VERSION ; kSXTErrBase == SXT_ERR_BASE.
+-- Declared before first use (OXT resolves a constant by lexical position; a
+-- forward reference silently evaluates to nothing).
+constant kSXTABIVersion is 2
+constant kSXTErrBase is -2000000000
+
+-- --------------------------------------------------------------------------
+-- Engine memory + Data bridges (resolve by NAME, so NO leading underscore).
+-- An LCB Data does not auto-bridge to a void*, so an out buffer is a raw block
+-- from MCMemoryAllocate passed as a Pointer, an in buffer is MCDataGetByptr +
+-- MCDataGetLength, and written bytes are copied back with MCDataCreateWithBytes.
+-- --------------------------------------------------------------------------
+foreign handler MCMemoryAllocate(in pSize as CUInt, out rPtr as Pointer) returns CBool binds to "<builtin>"
+foreign handler MCMemoryDeallocate(in pPtr as Pointer) returns nothing binds to "<builtin>"
+foreign handler MCDataGetByptr(in pData as Data) returns Pointer binds to "<builtin>"
+foreign handler MCDataGetLength(in pData as Data) returns CUInt binds to "<builtin>"
+foreign handler MCDataCreateWithBytes(in pBytes as Pointer, in pLen as CUInt, out rData as Data) returns CBool binds to "<builtin>"
+
+-- --------------------------------------------------------------------------
+-- The SodiumXT C ABI. Private _sxt_* names; the bind strings reference the
+-- stable exported symbols by name.
+-- --------------------------------------------------------------------------
+foreign handler _sxt_init() returns CInt binds to "c:sodiumxt>sxt_init"
+foreign handler _sxt_version() returns ZStringUTF8 binds to "c:sodiumxt>sxt_version"
+foreign handler _sxt_sodium_version() returns ZStringUTF8 binds to "c:sodiumxt>sxt_sodium_version"
+foreign handler _sxt_abi_version() returns CInt binds to "c:sodiumxt>sxt_abi_version"
+foreign handler _sxt_last_error() returns ZStringUTF8 binds to "c:sodiumxt>sxt_last_error"
+foreign handler _sxt_randombytes(in pOut as Pointer, in pCap as CInt, in pCount as CInt) returns CInt binds to "c:sodiumxt>sxt_randombytes"
+
+foreign handler _sxt_generichash(in pOut as Pointer, in pCap as CInt, in pOutLen as CInt, in pIn as Pointer, in pInLen as CInt, in pKey as Pointer, in pKeyLen as CInt) returns CInt binds to "c:sodiumxt>sxt_generichash"
+foreign handler _sxt_bin2hex(in pOut as Pointer, in pCap as CInt, in pIn as Pointer, in pInLen as CInt) returns CInt binds to "c:sodiumxt>sxt_bin2hex"
+foreign handler _sxt_hex2bin(in pOut as Pointer, in pCap as CInt, in pHex as Pointer, in pHexLen as CInt) returns CInt binds to "c:sodiumxt>sxt_hex2bin"
+foreign handler _sxt_bin2base64(in pOut as Pointer, in pCap as CInt, in pIn as Pointer, in pInLen as CInt, in pVariant as CInt) returns CInt binds to "c:sodiumxt>sxt_bin2base64"
+foreign handler _sxt_base642bin(in pOut as Pointer, in pCap as CInt, in pB64 as Pointer, in pB64Len as CInt, in pVariant as CInt) returns CInt binds to "c:sodiumxt>sxt_base642bin"
+foreign handler _sxt_base64_variant_urlsafe_no_padding() returns CInt binds to "c:sodiumxt>sxt_base64_variant_urlsafe_no_padding"
+foreign handler _sxt_memequal(in pA as Pointer, in pALen as CInt, in pB as Pointer, in pBLen as CInt) returns CInt binds to "c:sodiumxt>sxt_memequal"
+
+foreign handler _sxt_secretbox(in pOut as Pointer, in pCap as CInt, in pMsg as Pointer, in pMsgLen as CInt, in pKey as Pointer, in pKeyLen as CInt) returns CInt binds to "c:sodiumxt>sxt_secretbox"
+foreign handler _sxt_secretbox_open(in pOut as Pointer, in pCap as CInt, in pBox as Pointer, in pBoxLen as CInt, in pKey as Pointer, in pKeyLen as CInt) returns CInt binds to "c:sodiumxt>sxt_secretbox_open"
+foreign handler _sxt_aead_encrypt(in pOut as Pointer, in pCap as CInt, in pMsg as Pointer, in pMsgLen as CInt, in pAd as Pointer, in pAdLen as CInt, in pKey as Pointer, in pKeyLen as CInt) returns CInt binds to "c:sodiumxt>sxt_aead_encrypt"
+foreign handler _sxt_aead_decrypt(in pOut as Pointer, in pCap as CInt, in pBox as Pointer, in pBoxLen as CInt, in pAd as Pointer, in pAdLen as CInt, in pKey as Pointer, in pKeyLen as CInt) returns CInt binds to "c:sodiumxt>sxt_aead_decrypt"
+
+foreign handler _sxt_pwhash(in pOut as Pointer, in pCap as CInt, in pOutLen as CInt, in pPass as Pointer, in pPassLen as CInt, in pSalt as Pointer, in pSaltLen as CInt, in pOps as ZStringUTF8, in pMem as ZStringUTF8) returns CInt binds to "c:sodiumxt>sxt_pwhash"
+foreign handler _sxt_pwhash_str(in pOut as Pointer, in pCap as CInt, in pPass as Pointer, in pPassLen as CInt, in pOps as ZStringUTF8, in pMem as ZStringUTF8) returns CInt binds to "c:sodiumxt>sxt_pwhash_str"
+foreign handler _sxt_pwhash_str_verify(in pHash as ZStringUTF8, in pPass as Pointer, in pPassLen as CInt) returns CInt binds to "c:sodiumxt>sxt_pwhash_str_verify"
+foreign handler _sxt_pwhash_saltbytes() returns CInt binds to "c:sodiumxt>sxt_pwhash_saltbytes"
+foreign handler _sxt_pwhash_strbytes() returns CInt binds to "c:sodiumxt>sxt_pwhash_strbytes"
+foreign handler _sxt_pwhash_opslimit_interactive() returns CInt binds to "c:sodiumxt>sxt_pwhash_opslimit_interactive"
+foreign handler _sxt_pwhash_opslimit_moderate() returns CInt binds to "c:sodiumxt>sxt_pwhash_opslimit_moderate"
+foreign handler _sxt_pwhash_opslimit_sensitive() returns CInt binds to "c:sodiumxt>sxt_pwhash_opslimit_sensitive"
+foreign handler _sxt_pwhash_memlimit_interactive() returns ZStringUTF8 binds to "c:sodiumxt>sxt_pwhash_memlimit_interactive"
+foreign handler _sxt_pwhash_memlimit_moderate() returns ZStringUTF8 binds to "c:sodiumxt>sxt_pwhash_memlimit_moderate"
+foreign handler _sxt_pwhash_memlimit_sensitive() returns ZStringUTF8 binds to "c:sodiumxt>sxt_pwhash_memlimit_sensitive"
+foreign handler _sxt_kdf_derive(in pOut as Pointer, in pCap as CInt, in pSubLen as CInt, in pId as ZStringUTF8, in pCtx as Pointer, in pCtxLen as CInt, in pMaster as Pointer, in pMasterLen as CInt) returns CInt binds to "c:sodiumxt>sxt_kdf_derive"
+
+foreign handler _sxt_secretstream_headerbytes() returns CInt binds to "c:sodiumxt>sxt_secretstream_headerbytes"
+foreign handler _sxt_secretstream_tag_message() returns CInt binds to "c:sodiumxt>sxt_secretstream_tag_message"
+foreign handler _sxt_secretstream_tag_final() returns CInt binds to "c:sodiumxt>sxt_secretstream_tag_final"
+foreign handler _sxt_secretstream_init_push(in pHeader as Pointer, in pHeaderCap as CInt, in pKey as Pointer, in pKeyLen as CInt) returns CInt binds to "c:sodiumxt>sxt_secretstream_init_push"
+foreign handler _sxt_secretstream_push(in pHandle as CInt, in pOut as Pointer, in pCap as CInt, in pChunk as Pointer, in pChunkLen as CInt, in pAd as Pointer, in pAdLen as CInt, in pTag as CInt) returns CInt binds to "c:sodiumxt>sxt_secretstream_push"
+foreign handler _sxt_secretstream_init_pull(in pHeader as Pointer, in pHeaderLen as CInt, in pKey as Pointer, in pKeyLen as CInt) returns CInt binds to "c:sodiumxt>sxt_secretstream_init_pull"
+foreign handler _sxt_secretstream_pull(in pHandle as CInt, in pOut as Pointer, in pCap as CInt, in pIn as Pointer, in pInLen as CInt, in pAd as Pointer, in pAdLen as CInt) returns CInt binds to "c:sodiumxt>sxt_secretstream_pull"
+foreign handler _sxt_secretstream_last_tag(in pHandle as CInt) returns CInt binds to "c:sodiumxt>sxt_secretstream_last_tag"
+foreign handler _sxt_free_stream(in pHandle as CInt) returns nothing binds to "c:sodiumxt>sxt_free_stream"
+foreign handler _sxt_encrypt_file(in pSrc as ZStringUTF8, in pDst as ZStringUTF8, in pKey as Pointer, in pKeyLen as CInt) returns CInt binds to "c:sodiumxt>sxt_encrypt_file"
+foreign handler _sxt_decrypt_file(in pSrc as ZStringUTF8, in pDst as ZStringUTF8, in pKey as Pointer, in pKeyLen as CInt) returns CInt binds to "c:sodiumxt>sxt_decrypt_file"
+
+foreign handler _sxt_box_publickeybytes() returns CInt binds to "c:sodiumxt>sxt_box_publickeybytes"
+foreign handler _sxt_box_secretkeybytes() returns CInt binds to "c:sodiumxt>sxt_box_secretkeybytes"
+foreign handler _sxt_box_keypair(in pPk as Pointer, in pPkCap as CInt, in pSk as Pointer, in pSkCap as CInt) returns CInt binds to "c:sodiumxt>sxt_box_keypair"
+foreign handler _sxt_box(in pOut as Pointer, in pCap as CInt, in pMsg as Pointer, in pMsgLen as CInt, in pRpk as Pointer, in pRpkLen as CInt, in pSsk as Pointer, in pSskLen as CInt) returns CInt binds to "c:sodiumxt>sxt_box"
+foreign handler _sxt_box_open(in pOut as Pointer, in pCap as CInt, in pBox as Pointer, in pBoxLen as CInt, in pSpk as Pointer, in pSpkLen as CInt, in pRsk as Pointer, in pRskLen as CInt) returns CInt binds to "c:sodiumxt>sxt_box_open"
+foreign handler _sxt_box_seal(in pOut as Pointer, in pCap as CInt, in pMsg as Pointer, in pMsgLen as CInt, in pRpk as Pointer, in pRpkLen as CInt) returns CInt binds to "c:sodiumxt>sxt_box_seal"
+foreign handler _sxt_box_seal_open(in pOut as Pointer, in pCap as CInt, in pSealed as Pointer, in pSealedLen as CInt, in pRpk as Pointer, in pRpkLen as CInt, in pRsk as Pointer, in pRskLen as CInt) returns CInt binds to "c:sodiumxt>sxt_box_seal_open"
+
+foreign handler _sxt_sign_publickeybytes() returns CInt binds to "c:sodiumxt>sxt_sign_publickeybytes"
+foreign handler _sxt_sign_secretkeybytes() returns CInt binds to "c:sodiumxt>sxt_sign_secretkeybytes"
+foreign handler _sxt_sign_bytes() returns CInt binds to "c:sodiumxt>sxt_sign_bytes"
+foreign handler _sxt_sign_seedbytes() returns CInt binds to "c:sodiumxt>sxt_sign_seedbytes"
+foreign handler _sxt_sign_keypair(in pPk as Pointer, in pPkCap as CInt, in pSk as Pointer, in pSkCap as CInt) returns CInt binds to "c:sodiumxt>sxt_sign_keypair"
+foreign handler _sxt_sign_keypair_from_seed(in pPk as Pointer, in pPkCap as CInt, in pSk as Pointer, in pSkCap as CInt, in pSeed as Pointer, in pSeedLen as CInt) returns CInt binds to "c:sodiumxt>sxt_sign_keypair_from_seed"
+foreign handler _sxt_sign_detached(in pSig as Pointer, in pSigCap as CInt, in pMsg as Pointer, in pMsgLen as CInt, in pSk as Pointer, in pSkLen as CInt) returns CInt binds to "c:sodiumxt>sxt_sign_detached"
+foreign handler _sxt_sign_verify_detached(in pSig as Pointer, in pSigLen as CInt, in pMsg as Pointer, in pMsgLen as CInt, in pPk as Pointer, in pPkLen as CInt) returns CInt binds to "c:sodiumxt>sxt_sign_verify_detached"
+foreign handler _sxt_sign(in pOut as Pointer, in pCap as CInt, in pMsg as Pointer, in pMsgLen as CInt, in pSk as Pointer, in pSkLen as CInt) returns CInt binds to "c:sodiumxt>sxt_sign"
+foreign handler _sxt_sign_open(in pOut as Pointer, in pCap as CInt, in pSigned as Pointer, in pSignedLen as CInt, in pPk as Pointer, in pPkLen as CInt) returns CInt binds to "c:sodiumxt>sxt_sign_open"
+
+foreign handler _sxt_kx_publickeybytes() returns CInt binds to "c:sodiumxt>sxt_kx_publickeybytes"
+foreign handler _sxt_kx_secretkeybytes() returns CInt binds to "c:sodiumxt>sxt_kx_secretkeybytes"
+foreign handler _sxt_kx_sessionkeybytes() returns CInt binds to "c:sodiumxt>sxt_kx_sessionkeybytes"
+foreign handler _sxt_kx_keypair(in pPk as Pointer, in pPkCap as CInt, in pSk as Pointer, in pSkCap as CInt) returns CInt binds to "c:sodiumxt>sxt_kx_keypair"
+foreign handler _sxt_kx_client_session_keys(in pRx as Pointer, in pRxCap as CInt, in pTx as Pointer, in pTxCap as CInt, in pCpk as Pointer, in pCpkLen as CInt, in pCsk as Pointer, in pCskLen as CInt, in pSpk as Pointer, in pSpkLen as CInt) returns CInt binds to "c:sodiumxt>sxt_kx_client_session_keys"
+foreign handler _sxt_kx_server_session_keys(in pRx as Pointer, in pRxCap as CInt, in pTx as Pointer, in pTxCap as CInt, in pSpk as Pointer, in pSpkLen as CInt, in pSsk as Pointer, in pSskLen as CInt, in pCpk as Pointer, in pCpkLen as CInt) returns CInt binds to "c:sodiumxt>sxt_kx_server_session_keys"
+
+foreign handler _sxt_pad(in pOut as Pointer, in pCap as CInt, in pIn as Pointer, in pInLen as CInt, in pBlock as CInt) returns CInt binds to "c:sodiumxt>sxt_pad"
+foreign handler _sxt_unpad(in pIn as Pointer, in pInLen as CInt, in pBlock as CInt) returns CInt binds to "c:sodiumxt>sxt_unpad"
+
+-- --------------------------------------------------------------------------
+-- Private helpers. Each wraps its foreign call(s) in `unsafe`, so the public
+-- handlers below stay readable and the foreign-call discipline lives in one
+-- place. All handler-local declarations are at the top (a nested `local` has
+-- broken whole-script compilation in OXT).
+-- --------------------------------------------------------------------------
+
+-- Verify the native ABI and initialize libsodium (idempotent, cheap). Throws on
+-- skew or a failed init instead of corrupting memory on first use.
+private handler sPrepare() returns nothing
+   variable tAbi as Integer
+   variable tRc as Integer
+
+   unsafe
+      put _sxt_abi_version() into tAbi
+   end unsafe
+   if tAbi is not kSXTABIVersion then
+      throw "SodiumXT ABI mismatch: native library reports" && tAbi & ", extension expects" && kSXTABIVersion & ". Reinstall the packaged extension."
+   end if
+   unsafe
+      put _sxt_init() into tRc
+   end unsafe
+   if tRc is not 0 then
+      throw "SodiumXT: libsodium failed to initialize."
+   end if
+end handler
+
+private handler sLastError() returns String
+   variable tMsg as String
+   unsafe
+      put _sxt_last_error() into tMsg
+   end unsafe
+   return tMsg
+end handler
+
+private handler sAlloc(in pCap as Integer) returns Pointer
+   variable tPtr as Pointer
+   variable tOk as CBool
+   unsafe
+      put MCMemoryAllocate(pCap, tPtr) into tOk
+   end unsafe
+   if not tOk then
+      throw "SodiumXT: out of memory allocating" && pCap && "bytes."
+   end if
+   return tPtr
+end handler
+
+private handler sFree(in pPtr as Pointer) returns nothing
+   unsafe
+      MCMemoryDeallocate(pPtr)
+   end unsafe
+end handler
+
+private handler sDataPtr(in pData as Data) returns Pointer
+   variable tPtr as Pointer
+   unsafe
+      put MCDataGetByptr(pData) into tPtr
+   end unsafe
+   return tPtr
+end handler
+
+private handler sDataLen(in pData as Data) returns Integer
+   variable tLen as Integer
+   unsafe
+      put MCDataGetLength(pData) into tLen
+   end unsafe
+   return tLen
+end handler
+
+private handler sToData(in pPtr as Pointer, in pLen as Integer) returns Data
+   variable tResult as Data
+   variable tOk as CBool
+   unsafe
+      put MCDataCreateWithBytes(pPtr, pLen, tResult) into tOk
+   end unsafe
+   if not tOk then
+      throw "SodiumXT: could not build result data."
+   end if
+   return tResult
+end handler
+
+-- Common tail for a buffer-filling call: a negative result is either a -needed
+-- (our allocation was somehow short) or a hard error; either way we free and
+-- surface the native message. On success we copy exactly the written bytes.
+private handler sFinish(in pName as String, in pPtr as Pointer, in pWritten as Integer) returns Data
+   variable tResult as Data
+   if pWritten < 0 then
+      sFree(pPtr)
+      throw pName & ":" && sLastError()
+   end if
+   put sToData(pPtr, pWritten) into tResult
+   sFree(pPtr)
+   return tResult
+end handler
+
+-- ==========================================================================
+-- Util / init.
+-- ==========================================================================
+
+public handler sxInit() returns nothing
+   sPrepare()
+end handler
+
+public handler sxVersion() returns String
+   variable tProductVer as String
+   variable tSodiumVer as String
+   sPrepare()
+   unsafe
+      put _sxt_version() into tProductVer
+      put _sxt_sodium_version() into tSodiumVer
+   end unsafe
+   return "SodiumXT" && tProductVer && "(libsodium" && tSodiumVer & ")"
+end handler
+
+public handler sxLastError() returns String
+   return sLastError()
+end handler
+
+-- Cryptographically secure random bytes (the ONLY sanctioned source of salts,
+-- nonces, and keys; never use the engine random() for anything unguessable).
+public handler sxRandomBytes(in pCount as Integer) returns Data
+   variable tOut as Pointer
+   variable tWritten as Integer
+   sPrepare()
+   if pCount < 0 then
+      throw "sxRandomBytes: count must be zero or positive."
+   end if
+   put sAlloc(pCount + 1) into tOut
+   unsafe
+      put _sxt_randombytes(tOut, pCount + 1, pCount) into tWritten
+   end unsafe
+   return sFinish("sxRandomBytes", tOut, tWritten)
+end handler
+
+-- ==========================================================================
+-- Hashing + encoding + constant-time compare.
+-- ==========================================================================
+
+-- BLAKE2b digest (default 32 bytes). Unkeyed.
+public handler sxHash(in pData as Data, in pOutLen as Integer) returns Data
+   variable tOut as Pointer
+   variable tInPtr as Pointer
+   variable tInLen as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pData) into tInLen
+   put sDataPtr(pData) into tInPtr
+   put sAlloc(pOutLen + 1) into tOut
+   unsafe
+      put _sxt_generichash(tOut, pOutLen + 1, pOutLen, tInPtr, tInLen, nothing, 0) into tWritten
+   end unsafe
+   return sFinish("sxHash", tOut, tWritten)
+end handler
+
+-- Keyed BLAKE2b (a MAC / domain-separated hash).
+public handler sxHashKeyed(in pData as Data, in pKey as Data, in pOutLen as Integer) returns Data
+   variable tOut as Pointer
+   variable tInPtr as Pointer
+   variable tInLen as Integer
+   variable tKeyPtr as Pointer
+   variable tKeyLen as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pData) into tInLen
+   put sDataPtr(pData) into tInPtr
+   put sDataLen(pKey) into tKeyLen
+   put sDataPtr(pKey) into tKeyPtr
+   put sAlloc(pOutLen + 1) into tOut
+   unsafe
+      put _sxt_generichash(tOut, pOutLen + 1, pOutLen, tInPtr, tInLen, tKeyPtr, tKeyLen) into tWritten
+   end unsafe
+   return sFinish("sxHashKeyed", tOut, tWritten)
+end handler
+
+public handler sxBin2Hex(in pData as Data) returns String
+   variable tOut as Pointer
+   variable tInPtr as Pointer
+   variable tInLen as Integer
+   variable tWritten as Integer
+   variable tHexData as Data
+   sPrepare()
+   put sDataLen(pData) into tInLen
+   put sDataPtr(pData) into tInPtr
+   put sAlloc(tInLen * 2 + 1) into tOut
+   unsafe
+      put _sxt_bin2hex(tOut, tInLen * 2 + 1, tInPtr, tInLen) into tWritten
+   end unsafe
+   put sFinish("sxBin2Hex", tOut, tWritten) into tHexData
+   return textDecode(tHexData, "ascii")
+end handler
+
+public handler sxHex2Bin(in pHex as String) returns Data
+   variable tOut as Pointer
+   variable tInData as Data
+   variable tInPtr as Pointer
+   variable tInLen as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put textEncode(pHex, "ascii") into tInData
+   put sDataLen(tInData) into tInLen
+   put sDataPtr(tInData) into tInPtr
+   put sAlloc(tInLen + 1) into tOut
+   unsafe
+      put _sxt_hex2bin(tOut, tInLen + 1, tInPtr, tInLen) into tWritten
+   end unsafe
+   return sFinish("sxHex2Bin", tOut, tWritten)
+end handler
+
+-- base64, URL-safe with no padding (the friendly default for share codes).
+public handler sxBin2Base64(in pData as Data) returns String
+   variable tOut as Pointer
+   variable tInPtr as Pointer
+   variable tInLen as Integer
+   variable tVariant as Integer
+   variable tWritten as Integer
+   variable tB64 as Data
+   sPrepare()
+   put sDataLen(pData) into tInLen
+   put sDataPtr(pData) into tInPtr
+   unsafe
+      put _sxt_base64_variant_urlsafe_no_padding() into tVariant
+   end unsafe
+   put sAlloc(tInLen * 2 + 8) into tOut
+   unsafe
+      put _sxt_bin2base64(tOut, tInLen * 2 + 8, tInPtr, tInLen, tVariant) into tWritten
+   end unsafe
+   put sFinish("sxBin2Base64", tOut, tWritten) into tB64
+   return textDecode(tB64, "ascii")
+end handler
+
+public handler sxBase642Bin(in pB64 as String) returns Data
+   variable tOut as Pointer
+   variable tInData as Data
+   variable tInPtr as Pointer
+   variable tInLen as Integer
+   variable tVariant as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put textEncode(pB64, "ascii") into tInData
+   put sDataLen(tInData) into tInLen
+   put sDataPtr(tInData) into tInPtr
+   unsafe
+      put _sxt_base64_variant_urlsafe_no_padding() into tVariant
+   end unsafe
+   put sAlloc(tInLen + 1) into tOut
+   unsafe
+      put _sxt_base642bin(tOut, tInLen + 1, tInPtr, tInLen, tVariant) into tWritten
+   end unsafe
+   return sFinish("sxBase642Bin", tOut, tWritten)
+end handler
+
+-- Constant-time equality. The ONLY sanctioned way to compare a MAC, tag, hash,
+-- or any secret; never use `is` / `=` on secret bytes (a timing leak).
+public handler sxMemEqual(in pA as Data, in pB as Data) returns Boolean
+   variable tAPtr as Pointer
+   variable tBPtr as Pointer
+   variable tALen as Integer
+   variable tBLen as Integer
+   variable tR as Integer
+   sPrepare()
+   put sDataLen(pA) into tALen
+   put sDataPtr(pA) into tAPtr
+   put sDataLen(pB) into tBLen
+   put sDataPtr(pB) into tBPtr
+   unsafe
+      put _sxt_memequal(tAPtr, tALen, tBPtr, tBLen) into tR
+   end unsafe
+   return tR is 1
+end handler
+
+-- ==========================================================================
+-- Password hashing / KDF (Argon2id).
+-- ==========================================================================
+
+-- Preset selectors (return the opslimit as an Integer and the memlimit as a
+-- decimal String, ready to pass to sxPwHash / sxPwHashStr).
+public handler sxPwOpsModerate() returns Integer
+   variable tOps as Integer
+   sPrepare()
+   unsafe
+      put _sxt_pwhash_opslimit_moderate() into tOps
+   end unsafe
+   return tOps
+end handler
+
+public handler sxPwMemModerate() returns String
+   variable tMem as String
+   sPrepare()
+   unsafe
+      put _sxt_pwhash_memlimit_moderate() into tMem
+   end unsafe
+   return tMem
+end handler
+
+public handler sxPwOpsSensitive() returns Integer
+   variable tOps as Integer
+   sPrepare()
+   unsafe
+      put _sxt_pwhash_opslimit_sensitive() into tOps
+   end unsafe
+   return tOps
+end handler
+
+public handler sxPwMemSensitive() returns String
+   variable tMem as String
+   sPrepare()
+   unsafe
+      put _sxt_pwhash_memlimit_sensitive() into tMem
+   end unsafe
+   return tMem
+end handler
+
+-- Derive a pKeyLen-byte key from a passphrase + salt (store the salt and the
+-- ops/mem beside the data so you can re-derive and raise the cost later). The
+-- passphrase is pinned to UTF-8 so it derives the same key on every machine.
+public handler sxPwHash(in pPassphrase as String, in pSalt as Data, in pKeyLen as Integer, in pOpsLimit as Integer, in pMemLimit as String) returns Data
+   variable tOut as Pointer
+   variable tPass as Data
+   variable tPassPtr as Pointer
+   variable tPassLen as Integer
+   variable tSaltPtr as Pointer
+   variable tSaltLen as Integer
+   variable tOpsStr as String
+   variable tWritten as Integer
+   sPrepare()
+   put textEncode(pPassphrase, "utf-8") into tPass
+   put sDataLen(tPass) into tPassLen
+   put sDataPtr(tPass) into tPassPtr
+   put sDataLen(pSalt) into tSaltLen
+   put sDataPtr(pSalt) into tSaltPtr
+   put "" & pOpsLimit into tOpsStr
+   put sAlloc(pKeyLen + 1) into tOut
+   unsafe
+      put _sxt_pwhash(tOut, pKeyLen + 1, pKeyLen, tPassPtr, tPassLen, tSaltPtr, tSaltLen, tOpsStr, pMemLimit) into tWritten
+   end unsafe
+   return sFinish("sxPwHash", tOut, tWritten)
+end handler
+
+-- Hash a passphrase into a self-describing string for storage (it packs the
+-- salt and the ops/mem, so a single string is enough to verify later).
+public handler sxPwHashStr(in pPassphrase as String, in pOpsLimit as Integer, in pMemLimit as String) returns String
+   variable tOut as Pointer
+   variable tPass as Data
+   variable tPassPtr as Pointer
+   variable tPassLen as Integer
+   variable tCap as Integer
+   variable tOpsStr as String
+   variable tWritten as Integer
+   variable tStr as Data
+   sPrepare()
+   put textEncode(pPassphrase, "utf-8") into tPass
+   put sDataLen(tPass) into tPassLen
+   put sDataPtr(tPass) into tPassPtr
+   put "" & pOpsLimit into tOpsStr
+   unsafe
+      put _sxt_pwhash_strbytes() into tCap
+   end unsafe
+   put sAlloc(tCap) into tOut
+   unsafe
+      put _sxt_pwhash_str(tOut, tCap, tPassPtr, tPassLen, tOpsStr, pMemLimit) into tWritten
+   end unsafe
+   put sFinish("sxPwHashStr", tOut, tWritten) into tStr
+   return textDecode(tStr, "ascii")
+end handler
+
+-- Verify a passphrase against a stored sxPwHashStr string (constant time).
+public handler sxPwHashStrVerify(in pHash as String, in pPassphrase as String) returns Boolean
+   variable tPass as Data
+   variable tPassPtr as Pointer
+   variable tPassLen as Integer
+   variable tR as Integer
+   sPrepare()
+   put textEncode(pPassphrase, "utf-8") into tPass
+   put sDataLen(tPass) into tPassLen
+   put sDataPtr(tPass) into tPassPtr
+   unsafe
+      put _sxt_pwhash_str_verify(pHash, tPassPtr, tPassLen) into tR
+   end unsafe
+   return tR is 1
+end handler
+
+-- Derive subkey pSubkeyId (a non-negative integer as a String) from a master
+-- key, namespaced by an 8-byte context.
+public handler sxKdfDerive(in pMasterKey as Data, in pSubkeyId as String, in pContext as Data, in pSubkeyLen as Integer) returns Data
+   variable tOut as Pointer
+   variable tMasterPtr as Pointer
+   variable tMasterLen as Integer
+   variable tCtxPtr as Pointer
+   variable tCtxLen as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pMasterKey) into tMasterLen
+   put sDataPtr(pMasterKey) into tMasterPtr
+   put sDataLen(pContext) into tCtxLen
+   put sDataPtr(pContext) into tCtxPtr
+   put sAlloc(pSubkeyLen + 1) into tOut
+   unsafe
+      put _sxt_kdf_derive(tOut, pSubkeyLen + 1, pSubkeyLen, pSubkeyId, tCtxPtr, tCtxLen, tMasterPtr, tMasterLen) into tWritten
+   end unsafe
+   return sFinish("sxKdfDerive", tOut, tWritten)
+end handler
+
+-- ==========================================================================
+-- Secret-key authenticated encryption.
+-- ==========================================================================
+
+-- secretbox: the shim generates and prepends a random nonce; output is
+-- nonce || ciphertext || mac. Open returns an error on a wrong key or tampering.
+public handler sxSecretBox(in pMessage as Data, in pKey as Data) returns Data
+   variable tOut as Pointer
+   variable tMsgPtr as Pointer
+   variable tMsgLen as Integer
+   variable tKeyPtr as Pointer
+   variable tKeyLen as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pMessage) into tMsgLen
+   put sDataPtr(pMessage) into tMsgPtr
+   put sDataLen(pKey) into tKeyLen
+   put sDataPtr(pKey) into tKeyPtr
+   put sAlloc(tMsgLen + 128) into tOut
+   unsafe
+      put _sxt_secretbox(tOut, tMsgLen + 128, tMsgPtr, tMsgLen, tKeyPtr, tKeyLen) into tWritten
+   end unsafe
+   return sFinish("sxSecretBox", tOut, tWritten)
+end handler
+
+public handler sxSecretBoxOpen(in pBox as Data, in pKey as Data) returns Data
+   variable tOut as Pointer
+   variable tBoxPtr as Pointer
+   variable tBoxLen as Integer
+   variable tKeyPtr as Pointer
+   variable tKeyLen as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pBox) into tBoxLen
+   put sDataPtr(pBox) into tBoxPtr
+   put sDataLen(pKey) into tKeyLen
+   put sDataPtr(pKey) into tKeyPtr
+   put sAlloc(tBoxLen + 1) into tOut
+   unsafe
+      put _sxt_secretbox_open(tOut, tBoxLen + 1, tBoxPtr, tBoxLen, tKeyPtr, tKeyLen) into tWritten
+   end unsafe
+   return sFinish("sxSecretBoxOpen", tOut, tWritten)
+end handler
+
+-- AEAD: like secretbox but binds associated data (pAd) to the ciphertext.
+public handler sxAeadEncrypt(in pMessage as Data, in pAd as Data, in pKey as Data) returns Data
+   variable tOut as Pointer
+   variable tMsgPtr as Pointer
+   variable tMsgLen as Integer
+   variable tAdPtr as Pointer
+   variable tAdLen as Integer
+   variable tKeyPtr as Pointer
+   variable tKeyLen as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pMessage) into tMsgLen
+   put sDataPtr(pMessage) into tMsgPtr
+   put sDataLen(pAd) into tAdLen
+   put sDataPtr(pAd) into tAdPtr
+   put sDataLen(pKey) into tKeyLen
+   put sDataPtr(pKey) into tKeyPtr
+   put sAlloc(tMsgLen + 128) into tOut
+   unsafe
+      put _sxt_aead_encrypt(tOut, tMsgLen + 128, tMsgPtr, tMsgLen, tAdPtr, tAdLen, tKeyPtr, tKeyLen) into tWritten
+   end unsafe
+   return sFinish("sxAeadEncrypt", tOut, tWritten)
+end handler
+
+public handler sxAeadDecrypt(in pBox as Data, in pAd as Data, in pKey as Data) returns Data
+   variable tOut as Pointer
+   variable tBoxPtr as Pointer
+   variable tBoxLen as Integer
+   variable tAdPtr as Pointer
+   variable tAdLen as Integer
+   variable tKeyPtr as Pointer
+   variable tKeyLen as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pBox) into tBoxLen
+   put sDataPtr(pBox) into tBoxPtr
+   put sDataLen(pAd) into tAdLen
+   put sDataPtr(pAd) into tAdPtr
+   put sDataLen(pKey) into tKeyLen
+   put sDataPtr(pKey) into tKeyPtr
+   put sAlloc(tBoxLen + 1) into tOut
+   unsafe
+      put _sxt_aead_decrypt(tOut, tBoxLen + 1, tBoxPtr, tBoxLen, tAdPtr, tAdLen, tKeyPtr, tKeyLen) into tWritten
+   end unsafe
+   return sFinish("sxAeadDecrypt", tOut, tWritten)
+end handler
+
+-- ==========================================================================
+-- Streaming AEAD (secretstream) + file helpers.
+-- ==========================================================================
+
+-- Open an encrypt stream: returns the handle and writes the header into rHeader.
+-- The app must free the handle with sxFreeStream (no deterministic unload hook).
+public handler sxSecretStreamInitPush(in pKey as Data, out rHeader as Data) returns Integer
+   variable tHdr as Pointer
+   variable tHdrLen as Integer
+   variable tKeyPtr as Pointer
+   variable tKeyLen as Integer
+   variable tHandle as Integer
+   sPrepare()
+   put sDataLen(pKey) into tKeyLen
+   put sDataPtr(pKey) into tKeyPtr
+   unsafe
+      put _sxt_secretstream_headerbytes() into tHdrLen
+   end unsafe
+   put sAlloc(tHdrLen) into tHdr
+   unsafe
+      put _sxt_secretstream_init_push(tHdr, tHdrLen, tKeyPtr, tKeyLen) into tHandle
+   end unsafe
+   if tHandle < 0 then
+      sFree(tHdr)
+      throw "sxSecretStreamInitPush:" && sLastError()
+   end if
+   put sToData(tHdr, tHdrLen) into rHeader
+   sFree(tHdr)
+   return tHandle
+end handler
+
+-- Encrypt one chunk; pass true for pFinal on the LAST chunk (the FINAL tag is
+-- what makes a truncated stream detectable on pull).
+public handler sxSecretStreamPush(in pHandle as Integer, in pChunk as Data, in pAd as Data, in pFinal as Boolean) returns Data
+   variable tOut as Pointer
+   variable tChunkPtr as Pointer
+   variable tChunkLen as Integer
+   variable tAdPtr as Pointer
+   variable tAdLen as Integer
+   variable tTag as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pChunk) into tChunkLen
+   put sDataPtr(pChunk) into tChunkPtr
+   put sDataLen(pAd) into tAdLen
+   put sDataPtr(pAd) into tAdPtr
+   unsafe
+      if pFinal then
+         put _sxt_secretstream_tag_final() into tTag
+      else
+         put _sxt_secretstream_tag_message() into tTag
+      end if
+   end unsafe
+   put sAlloc(tChunkLen + 64) into tOut
+   unsafe
+      put _sxt_secretstream_push(pHandle, tOut, tChunkLen + 64, tChunkPtr, tChunkLen, tAdPtr, tAdLen, tTag) into tWritten
+   end unsafe
+   return sFinish("sxSecretStreamPush", tOut, tWritten)
+end handler
+
+public handler sxSecretStreamInitPull(in pKey as Data, in pHeader as Data) returns Integer
+   variable tHdrPtr as Pointer
+   variable tHdrLen as Integer
+   variable tKeyPtr as Pointer
+   variable tKeyLen as Integer
+   variable tHandle as Integer
+   sPrepare()
+   put sDataLen(pHeader) into tHdrLen
+   put sDataPtr(pHeader) into tHdrPtr
+   put sDataLen(pKey) into tKeyLen
+   put sDataPtr(pKey) into tKeyPtr
+   unsafe
+      put _sxt_secretstream_init_pull(tHdrPtr, tHdrLen, tKeyPtr, tKeyLen) into tHandle
+   end unsafe
+   if tHandle < 0 then
+      throw "sxSecretStreamInitPull:" && sLastError()
+   end if
+   return tHandle
+end handler
+
+-- Decrypt one chunk; rTag receives the chunk's tag (compare against the value
+-- from a final chunk to know the stream ended cleanly).
+public handler sxSecretStreamPull(in pHandle as Integer, in pCipherChunk as Data, in pAd as Data, out rTag as Integer) returns Data
+   variable tOut as Pointer
+   variable tInPtr as Pointer
+   variable tInLen as Integer
+   variable tAdPtr as Pointer
+   variable tAdLen as Integer
+   variable tWritten as Integer
+   variable tResult as Data
+   sPrepare()
+   put sDataLen(pCipherChunk) into tInLen
+   put sDataPtr(pCipherChunk) into tInPtr
+   put sDataLen(pAd) into tAdLen
+   put sDataPtr(pAd) into tAdPtr
+   put sAlloc(tInLen + 1) into tOut
+   unsafe
+      put _sxt_secretstream_pull(pHandle, tOut, tInLen + 1, tInPtr, tInLen, tAdPtr, tAdLen) into tWritten
+   end unsafe
+   if tWritten < 0 then
+      sFree(tOut)
+      throw "sxSecretStreamPull:" && sLastError()
+   end if
+   unsafe
+      put _sxt_secretstream_last_tag(pHandle) into rTag
+   end unsafe
+   put sToData(tOut, tWritten) into tResult
+   sFree(tOut)
+   return tResult
+end handler
+
+public handler sxIsFinalTag(in pTag as Integer) returns Boolean
+   variable tFinal as Integer
+   sPrepare()
+   unsafe
+      put _sxt_secretstream_tag_final() into tFinal
+   end unsafe
+   return pTag is tFinal
+end handler
+
+public handler sxFreeStream(in pHandle as Integer) returns nothing
+   unsafe
+      _sxt_free_stream(pHandle)
+   end unsafe
+end handler
+
+-- Encrypt/decrypt a file entirely C-side (the bytes never enter a Data, so a
+-- multi-gigabyte file streams without blowing up memory). Throws on error;
+-- decrypt also throws on a wrong key or a truncated/corrupt input.
+public handler sxEncryptFile(in pSrcPath as String, in pDstPath as String, in pKey as Data) returns nothing
+   variable tKeyPtr as Pointer
+   variable tKeyLen as Integer
+   variable tRc as Integer
+   sPrepare()
+   put sDataLen(pKey) into tKeyLen
+   put sDataPtr(pKey) into tKeyPtr
+   unsafe
+      put _sxt_encrypt_file(pSrcPath, pDstPath, tKeyPtr, tKeyLen) into tRc
+   end unsafe
+   if tRc is not 0 then
+      throw "sxEncryptFile:" && sLastError()
+   end if
+end handler
+
+public handler sxDecryptFile(in pSrcPath as String, in pDstPath as String, in pKey as Data) returns nothing
+   variable tKeyPtr as Pointer
+   variable tKeyLen as Integer
+   variable tRc as Integer
+   sPrepare()
+   put sDataLen(pKey) into tKeyLen
+   put sDataPtr(pKey) into tKeyPtr
+   unsafe
+      put _sxt_decrypt_file(pSrcPath, pDstPath, tKeyPtr, tKeyLen) into tRc
+   end unsafe
+   if tRc is not 0 then
+      throw "sxDecryptFile:" && sLastError()
+   end if
+end handler
+
+-- ==========================================================================
+-- Public-key boxes (X25519) + signatures (ed25519).
+-- ==========================================================================
+
+public handler sxBoxKeypair(out rPublicKey as Data, out rSecretKey as Data) returns nothing
+   variable tPk as Pointer
+   variable tSk as Pointer
+   variable tPkLen as Integer
+   variable tSkLen as Integer
+   variable tRc as Integer
+   sPrepare()
+   unsafe
+      put _sxt_box_publickeybytes() into tPkLen
+      put _sxt_box_secretkeybytes() into tSkLen
+   end unsafe
+   put sAlloc(tPkLen) into tPk
+   put sAlloc(tSkLen) into tSk
+   unsafe
+      put _sxt_box_keypair(tPk, tPkLen, tSk, tSkLen) into tRc
+   end unsafe
+   if tRc < 0 then
+      sFree(tPk)
+      sFree(tSk)
+      throw "sxBoxKeypair:" && sLastError()
+   end if
+   put sToData(tPk, tPkLen) into rPublicKey
+   put sToData(tSk, tSkLen) into rSecretKey
+   sFree(tPk)
+   sFree(tSk)
+end handler
+
+public handler sxBox(in pMessage as Data, in pRecipientPk as Data, in pSenderSk as Data) returns Data
+   variable tOut as Pointer
+   variable tMsgPtr as Pointer
+   variable tMsgLen as Integer
+   variable tPkPtr as Pointer
+   variable tPkLen as Integer
+   variable tSkPtr as Pointer
+   variable tSkLen as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pMessage) into tMsgLen
+   put sDataPtr(pMessage) into tMsgPtr
+   put sDataLen(pRecipientPk) into tPkLen
+   put sDataPtr(pRecipientPk) into tPkPtr
+   put sDataLen(pSenderSk) into tSkLen
+   put sDataPtr(pSenderSk) into tSkPtr
+   put sAlloc(tMsgLen + 128) into tOut
+   unsafe
+      put _sxt_box(tOut, tMsgLen + 128, tMsgPtr, tMsgLen, tPkPtr, tPkLen, tSkPtr, tSkLen) into tWritten
+   end unsafe
+   return sFinish("sxBox", tOut, tWritten)
+end handler
+
+public handler sxBoxOpen(in pBox as Data, in pSenderPk as Data, in pRecipientSk as Data) returns Data
+   variable tOut as Pointer
+   variable tBoxPtr as Pointer
+   variable tBoxLen as Integer
+   variable tPkPtr as Pointer
+   variable tPkLen as Integer
+   variable tSkPtr as Pointer
+   variable tSkLen as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pBox) into tBoxLen
+   put sDataPtr(pBox) into tBoxPtr
+   put sDataLen(pSenderPk) into tPkLen
+   put sDataPtr(pSenderPk) into tPkPtr
+   put sDataLen(pRecipientSk) into tSkLen
+   put sDataPtr(pRecipientSk) into tSkPtr
+   put sAlloc(tBoxLen + 1) into tOut
+   unsafe
+      put _sxt_box_open(tOut, tBoxLen + 1, tBoxPtr, tBoxLen, tPkPtr, tPkLen, tSkPtr, tSkLen) into tWritten
+   end unsafe
+   return sFinish("sxBoxOpen", tOut, tWritten)
+end handler
+
+-- Anonymous-sender sealed box: encrypt with only the recipient's public key.
+public handler sxSeal(in pMessage as Data, in pRecipientPk as Data) returns Data
+   variable tOut as Pointer
+   variable tMsgPtr as Pointer
+   variable tMsgLen as Integer
+   variable tPkPtr as Pointer
+   variable tPkLen as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pMessage) into tMsgLen
+   put sDataPtr(pMessage) into tMsgPtr
+   put sDataLen(pRecipientPk) into tPkLen
+   put sDataPtr(pRecipientPk) into tPkPtr
+   put sAlloc(tMsgLen + 128) into tOut
+   unsafe
+      put _sxt_box_seal(tOut, tMsgLen + 128, tMsgPtr, tMsgLen, tPkPtr, tPkLen) into tWritten
+   end unsafe
+   return sFinish("sxSeal", tOut, tWritten)
+end handler
+
+public handler sxSealOpen(in pSealed as Data, in pRecipientPk as Data, in pRecipientSk as Data) returns Data
+   variable tOut as Pointer
+   variable tInPtr as Pointer
+   variable tInLen as Integer
+   variable tPkPtr as Pointer
+   variable tPkLen as Integer
+   variable tSkPtr as Pointer
+   variable tSkLen as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pSealed) into tInLen
+   put sDataPtr(pSealed) into tInPtr
+   put sDataLen(pRecipientPk) into tPkLen
+   put sDataPtr(pRecipientPk) into tPkPtr
+   put sDataLen(pRecipientSk) into tSkLen
+   put sDataPtr(pRecipientSk) into tSkPtr
+   put sAlloc(tInLen + 1) into tOut
+   unsafe
+      put _sxt_box_seal_open(tOut, tInLen + 1, tInPtr, tInLen, tPkPtr, tPkLen, tSkPtr, tSkLen) into tWritten
+   end unsafe
+   return sFinish("sxSealOpen", tOut, tWritten)
+end handler
+
+public handler sxSignKeypair(out rPublicKey as Data, out rSecretKey as Data) returns nothing
+   variable tPk as Pointer
+   variable tSk as Pointer
+   variable tPkLen as Integer
+   variable tSkLen as Integer
+   variable tRc as Integer
+   sPrepare()
+   unsafe
+      put _sxt_sign_publickeybytes() into tPkLen
+      put _sxt_sign_secretkeybytes() into tSkLen
+   end unsafe
+   put sAlloc(tPkLen) into tPk
+   put sAlloc(tSkLen) into tSk
+   unsafe
+      put _sxt_sign_keypair(tPk, tPkLen, tSk, tSkLen) into tRc
+   end unsafe
+   if tRc < 0 then
+      sFree(tPk)
+      sFree(tSk)
+      throw "sxSignKeypair:" && sLastError()
+   end if
+   put sToData(tPk, tPkLen) into rPublicKey
+   put sToData(tSk, tSkLen) into rSecretKey
+   sFree(tPk)
+   sFree(tSk)
+end handler
+
+-- Deterministic ed25519 keypair from a seed (the BEP44-compatible primitive).
+public handler sxSignKeypairFromSeed(in pSeed as Data, out rPublicKey as Data, out rSecretKey as Data) returns nothing
+   variable tPk as Pointer
+   variable tSk as Pointer
+   variable tSeedPtr as Pointer
+   variable tSeedLen as Integer
+   variable tPkLen as Integer
+   variable tSkLen as Integer
+   variable tRc as Integer
+   sPrepare()
+   put sDataLen(pSeed) into tSeedLen
+   put sDataPtr(pSeed) into tSeedPtr
+   unsafe
+      put _sxt_sign_publickeybytes() into tPkLen
+      put _sxt_sign_secretkeybytes() into tSkLen
+   end unsafe
+   put sAlloc(tPkLen) into tPk
+   put sAlloc(tSkLen) into tSk
+   unsafe
+      put _sxt_sign_keypair_from_seed(tPk, tPkLen, tSk, tSkLen, tSeedPtr, tSeedLen) into tRc
+   end unsafe
+   if tRc < 0 then
+      sFree(tPk)
+      sFree(tSk)
+      throw "sxSignKeypairFromSeed:" && sLastError()
+   end if
+   put sToData(tPk, tPkLen) into rPublicKey
+   put sToData(tSk, tSkLen) into rSecretKey
+   sFree(tPk)
+   sFree(tSk)
+end handler
+
+public handler sxSignDetached(in pMessage as Data, in pSecretKey as Data) returns Data
+   variable tOut as Pointer
+   variable tMsgPtr as Pointer
+   variable tMsgLen as Integer
+   variable tSkPtr as Pointer
+   variable tSkLen as Integer
+   variable tSigBytes as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pMessage) into tMsgLen
+   put sDataPtr(pMessage) into tMsgPtr
+   put sDataLen(pSecretKey) into tSkLen
+   put sDataPtr(pSecretKey) into tSkPtr
+   unsafe
+      put _sxt_sign_bytes() into tSigBytes
+   end unsafe
+   put sAlloc(tSigBytes) into tOut
+   unsafe
+      put _sxt_sign_detached(tOut, tSigBytes, tMsgPtr, tMsgLen, tSkPtr, tSkLen) into tWritten
+   end unsafe
+   return sFinish("sxSignDetached", tOut, tWritten)
+end handler
+
+public handler sxSignVerifyDetached(in pSig as Data, in pMessage as Data, in pPublicKey as Data) returns Boolean
+   variable tSigPtr as Pointer
+   variable tSigLen as Integer
+   variable tMsgPtr as Pointer
+   variable tMsgLen as Integer
+   variable tPkPtr as Pointer
+   variable tPkLen as Integer
+   variable tR as Integer
+   sPrepare()
+   put sDataLen(pSig) into tSigLen
+   put sDataPtr(pSig) into tSigPtr
+   put sDataLen(pMessage) into tMsgLen
+   put sDataPtr(pMessage) into tMsgPtr
+   put sDataLen(pPublicKey) into tPkLen
+   put sDataPtr(pPublicKey) into tPkPtr
+   unsafe
+      put _sxt_sign_verify_detached(tSigPtr, tSigLen, tMsgPtr, tMsgLen, tPkPtr, tPkLen) into tR
+   end unsafe
+   return tR is 1
+end handler
+
+public handler sxSign(in pMessage as Data, in pSecretKey as Data) returns Data
+   variable tOut as Pointer
+   variable tMsgPtr as Pointer
+   variable tMsgLen as Integer
+   variable tSkPtr as Pointer
+   variable tSkLen as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pMessage) into tMsgLen
+   put sDataPtr(pMessage) into tMsgPtr
+   put sDataLen(pSecretKey) into tSkLen
+   put sDataPtr(pSecretKey) into tSkPtr
+   put sAlloc(tMsgLen + 128) into tOut
+   unsafe
+      put _sxt_sign(tOut, tMsgLen + 128, tMsgPtr, tMsgLen, tSkPtr, tSkLen) into tWritten
+   end unsafe
+   return sFinish("sxSign", tOut, tWritten)
+end handler
+
+public handler sxSignOpen(in pSignedMessage as Data, in pPublicKey as Data) returns Data
+   variable tOut as Pointer
+   variable tInPtr as Pointer
+   variable tInLen as Integer
+   variable tPkPtr as Pointer
+   variable tPkLen as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pSignedMessage) into tInLen
+   put sDataPtr(pSignedMessage) into tInPtr
+   put sDataLen(pPublicKey) into tPkLen
+   put sDataPtr(pPublicKey) into tPkPtr
+   put sAlloc(tInLen + 1) into tOut
+   unsafe
+      put _sxt_sign_open(tOut, tInLen + 1, tInPtr, tInLen, tPkPtr, tPkLen) into tWritten
+   end unsafe
+   return sFinish("sxSignOpen", tOut, tWritten)
+end handler
+
+-- ==========================================================================
+-- Key exchange (kx) + padding.
+-- ==========================================================================
+
+public handler sxKeyExchangeKeypair(out rPublicKey as Data, out rSecretKey as Data) returns nothing
+   variable tPk as Pointer
+   variable tSk as Pointer
+   variable tPkLen as Integer
+   variable tSkLen as Integer
+   variable tRc as Integer
+   sPrepare()
+   unsafe
+      put _sxt_kx_publickeybytes() into tPkLen
+      put _sxt_kx_secretkeybytes() into tSkLen
+   end unsafe
+   put sAlloc(tPkLen) into tPk
+   put sAlloc(tSkLen) into tSk
+   unsafe
+      put _sxt_kx_keypair(tPk, tPkLen, tSk, tSkLen) into tRc
+   end unsafe
+   if tRc < 0 then
+      sFree(tPk)
+      sFree(tSk)
+      throw "sxKeyExchangeKeypair:" && sLastError()
+   end if
+   put sToData(tPk, tPkLen) into rPublicKey
+   put sToData(tSk, tSkLen) into rSecretKey
+   sFree(tPk)
+   sFree(tSk)
+end handler
+
+-- The client derives its receive (rRx) and transmit (rTx) session keys.
+public handler sxKeyExchangeClient(in pClientPk as Data, in pClientSk as Data, in pServerPk as Data, out rRx as Data, out rTx as Data) returns nothing
+   variable tRx as Pointer
+   variable tTx as Pointer
+   variable tSkLen as Integer
+   variable tCpkPtr as Pointer
+   variable tCpkLen as Integer
+   variable tCskPtr as Pointer
+   variable tCskLen as Integer
+   variable tSpkPtr as Pointer
+   variable tSpkLen as Integer
+   variable tRc as Integer
+   sPrepare()
+   unsafe
+      put _sxt_kx_sessionkeybytes() into tSkLen
+   end unsafe
+   put sDataLen(pClientPk) into tCpkLen
+   put sDataPtr(pClientPk) into tCpkPtr
+   put sDataLen(pClientSk) into tCskLen
+   put sDataPtr(pClientSk) into tCskPtr
+   put sDataLen(pServerPk) into tSpkLen
+   put sDataPtr(pServerPk) into tSpkPtr
+   put sAlloc(tSkLen) into tRx
+   put sAlloc(tSkLen) into tTx
+   unsafe
+      put _sxt_kx_client_session_keys(tRx, tSkLen, tTx, tSkLen, tCpkPtr, tCpkLen, tCskPtr, tCskLen, tSpkPtr, tSpkLen) into tRc
+   end unsafe
+   if tRc < 0 then
+      sFree(tRx)
+      sFree(tTx)
+      throw "sxKeyExchangeClient:" && sLastError()
+   end if
+   put sToData(tRx, tSkLen) into rRx
+   put sToData(tTx, tSkLen) into rTx
+   sFree(tRx)
+   sFree(tTx)
+end handler
+
+public handler sxKeyExchangeServer(in pServerPk as Data, in pServerSk as Data, in pClientPk as Data, out rRx as Data, out rTx as Data) returns nothing
+   variable tRx as Pointer
+   variable tTx as Pointer
+   variable tSkLen as Integer
+   variable tSpkPtr as Pointer
+   variable tSpkLen as Integer
+   variable tSskPtr as Pointer
+   variable tSskLen as Integer
+   variable tCpkPtr as Pointer
+   variable tCpkLen as Integer
+   variable tRc as Integer
+   sPrepare()
+   unsafe
+      put _sxt_kx_sessionkeybytes() into tSkLen
+   end unsafe
+   put sDataLen(pServerPk) into tSpkLen
+   put sDataPtr(pServerPk) into tSpkPtr
+   put sDataLen(pServerSk) into tSskLen
+   put sDataPtr(pServerSk) into tSskPtr
+   put sDataLen(pClientPk) into tCpkLen
+   put sDataPtr(pClientPk) into tCpkPtr
+   put sAlloc(tSkLen) into tRx
+   put sAlloc(tSkLen) into tTx
+   unsafe
+      put _sxt_kx_server_session_keys(tRx, tSkLen, tTx, tSkLen, tSpkPtr, tSpkLen, tSskPtr, tSskLen, tCpkPtr, tCpkLen) into tRc
+   end unsafe
+   if tRc < 0 then
+      sFree(tRx)
+      sFree(tTx)
+      throw "sxKeyExchangeServer:" && sLastError()
+   end if
+   put sToData(tRx, tSkLen) into rRx
+   put sToData(tTx, tSkLen) into rTx
+   sFree(tRx)
+   sFree(tTx)
+end handler
+
+-- Pad pData up to a multiple of pBlockSize (hides the exact message length
+-- before encryption); sxUnpad recovers the original bytes.
+public handler sxPad(in pData as Data, in pBlockSize as Integer) returns Data
+   variable tOut as Pointer
+   variable tInPtr as Pointer
+   variable tInLen as Integer
+   variable tCap as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pData) into tInLen
+   put sDataPtr(pData) into tInPtr
+   put tInLen + pBlockSize into tCap
+   put sAlloc(tCap) into tOut
+   unsafe
+      put _sxt_pad(tOut, tCap, tInPtr, tInLen, pBlockSize) into tWritten
+   end unsafe
+   return sFinish("sxPad", tOut, tWritten)
+end handler
+
+public handler sxUnpad(in pData as Data, in pBlockSize as Integer) returns Data
+   variable tInPtr as Pointer
+   variable tInLen as Integer
+   variable tUnpadded as Integer
+   sPrepare()
+   put sDataLen(pData) into tInLen
+   put sDataPtr(pData) into tInPtr
+   unsafe
+      put _sxt_unpad(tInPtr, tInLen, pBlockSize) into tUnpadded
+   end unsafe
+   if tUnpadded < 0 then
+      throw "sxUnpad:" && sLastError()
+   end if
+   -- keep the first tUnpadded bytes of the input
+   return sToData(tInPtr, tUnpadded)
+end handler
