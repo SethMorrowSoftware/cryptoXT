@@ -56,12 +56,12 @@ jobs:
           - os: windows-latest
             platform: x86_64-win32
             ext: dll
-            arch: x64
+            msvc_arch: amd64
             triplet: x64-windows-static
           - os: windows-latest
             platform: x86-win32
             ext: dll
-            arch: Win32
+            msvc_arch: x86
             triplet: x86-windows-static
     steps:
       - uses: actions/checkout@v4
@@ -78,6 +78,16 @@ jobs:
         shell: pwsh
         run: vcpkg install libsodium:${{ matrix.triplet }}
 
+      # Set up the MSVC toolchain in the shell, then build with the NMake
+      # generator. This avoids the "Visual Studio NN" generator's VS-instance
+      # detection (which fails on the current runner image), and the matching
+      # msvc_arch gives us a native x64 or x86 cl.exe.
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+
       - name: Configure, build, test (Unix)
         if: runner.os != 'Windows'
         run: |
@@ -89,12 +99,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A ${{ matrix.arch }} `
+          cmake -S . -B build -G "NMake Makefiles" `
+            -DCMAKE_BUILD_TYPE=Release `
             -DSODIUMXT_BUILD_TESTS=ON `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
-          cmake --build build --config Release
-          ctest --test-dir build -C Release --output-on-failure
+          cmake --build build
+          ctest --test-dir build --output-on-failure
 
       - name: Package the native library
         run: python tools/package-extension.py --build-dir build --platform-id ${{ matrix.platform }}
