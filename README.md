@@ -6,10 +6,12 @@ streaming AEAD for large files, X25519 boxes, ed25519 signatures, BLAKE2b hashin
 CSPRNG) to xTalk, behind a flat C ABI with an LCB layer on top, the same shape as its sibling
 extension TorrentXT.
 
-## Status: Phases 0-5 of the C shim are implemented and verified
+## Status: Phases 0-6 complete and verified on-engine
 
 The full libsodium surface from `docs/SodiumXT-IMPLEMENTATION-PLAN.md` is wrapped in the C
-shim and exercised by the test suite:
+shim and exercised by the test suite. The whole `sx*` API has been run on the OXT engine
+(Windows x64): `put sxSelfTest()` reports **35 / 35 PASSED**. See `docs/api-reference.md`
+for the per-handler reference.
 
 - **Phase 0** - the FFI buffer round trip (`sxVersion`, `sxRandomBytes`), the proof a `Data`
   survives script -> Pointer -> C -> Pointer -> `Data` intact.
@@ -24,7 +26,7 @@ shim and exercised by the test suite:
 
 ```
 src/sodium_shim.{c,h}   C shim, ABI sxt_* (99 symbols)  ->  sodiumxt.{so,dll,dylib}
-src/sodium.lcb          LCB binding, public sx* (54 handlers; core verified on-engine, Phase 6 needs an OXT pass)
+src/sodium.lcb          LCB binding, public sx* (54 handlers; verified on-engine, OXT self-test 35/35)
 tests/sodium_smoke_test.c   160 checks: KATs + round trips + tamper/truncation + the firewall
 CMakeLists.txt          acquires a pinned libsodium (1.0.20) and static-links it
 tools/                  check-livecodescript.py (static gate) + package-extension.py
@@ -36,9 +38,12 @@ RFC vectors (BLAKE2b, Argon2id, ed25519) and tamper / wrong-key / truncation tes
 the authentication actually fails closed. The CMake build produces a `sodiumxt` shared library
 exporting **only** the `sxt_*` surface, and the static checker is green.
 
-The **`.lcb` layer is verified statically only** - OXT has no headless compiler here, so its
-engine-specific foreign declarations need reconciling against TorrentXT's proven bindings on a
-real OXT compile. See the banner at the top of `src/sodium.lcb`.
+The **`.lcb` layer is verified on-engine**: it compiles and loads in OXT, and `sxSelfTest()`
+exercises every `sx*` handler (round trips, known-answer vectors, tamper / wrong-key checks)
+to **35 / 35 PASSED** on OXT Windows x64. The C ABI and the `.lcb` are platform-independent
+and the C suite plus the committed binaries are green on all five platforms via CI, so the
+other OXT platforms are expected to match; a 30-second `sxSelfTest()` on mac/Linux OXT would
+close them formally. The reconciliation history is in the banner at the top of `src/sodium.lcb`.
 
 ## What is here
 

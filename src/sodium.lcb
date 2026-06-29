@@ -7,35 +7,34 @@
 -- key derivation, key exchange, and padding.
 --
 -- ==========================================================================
--- ON-ENGINE PASS, ROUND 2. Reconciled against a real OXT compile + a crash
--- audit (the harness crashed OXT on Linux x64 on its first FFI calls).
--- Resolved:
---   * the module needs `end library` (an LCB library is a bracketed block);
---   * the foreign types (Pointer/CInt/CUInt/CBool/UIntSize/ZStringUTF8) come
---     from `use com.livecode.foreign`; the operators `&`/`&&`/`is`/`is not`
---     from `use com.livecode.string`; arithmetic `+`/`-`/`*`/`<` from
---     `use com.livecode.arithmetic`;
+-- VERIFIED ON-ENGINE. This module compiles, loads, and runs on the OXT engine
+-- (Windows x64): examples/sodium-tests.livecodescript `put sxSelfTest()` reports
+-- 35 / 35 PASSED, exercising every sx* handler with round trips, known-answer
+-- vectors, and tamper / wrong-key checks. The conventions below were settled
+-- against a real OXT compile and a crash audit; they are recorded so they are
+-- not relearned:
+--   * an LCB library is a bracketed block: it must end with `end library`;
+--   * foreign types (Pointer/CInt/CUInt/CBool/UIntSize/ZStringUTF8) come from
+--     `use com.livecode.foreign`; `&`/`&&`/`is`/`is not` from
+--     `use com.livecode.string`; `+`/`-`/`*`/`<` from `use com.livecode.arithmetic`;
 --   * the in-buffer accessor is MCDataGetBytePtr (not ...Byptr);
 --   * textEncode/textDecode are NOT available to an LCB module, so byte values
---     cross as Data; a String is built from filled bytes with
+--     cross as Data and a String is built from filled bytes with
 --     MCStringCreateWithBytes (the engine's own idiom). Hex/base64 and the
---     pwhash_str output are returned as Data (ASCII bytes); the caller can
---     textDecode in livecodescript if a String is wanted.
--- TWO CRASH BUGS FOUND AND FIXED in this round (both verified against the
--- LiveCode engine source; ABI bumped 2 -> 3):
---   1. MCMemoryAllocate's size is C `size_t`, so it must marshal as UIntSize,
---      NOT CUInt. CUInt passed a 4-byte size where the callee reads 8 bytes on
---      64-bit, so the allocation size was garbage and the first buffer fill
---      corrupted the heap. (Hit by sxRandomBytes, the harness's 2nd call.)
---   2. A foreign handler that RETURNS a bridged C string (ZStringUTF8 etc.)
---      makes the engine adopt and free() the returned pointer; the shim's
---      version/error/memlimit returns were static storage, so the engine
---      free()d static memory. (Hit by sxVersion, the harness's 1st call.)
---      Fixed by filling a caller buffer and returning length/-needed, like the
---      byte-buffer calls; the shim no longer returns any const char*.
--- Still wants an OXT pass: out-parameter call syntax for the keypair / kx /
--- secretstream-pull handlers. The native C layer is fully tested (KATs +
--- ASan/UBSan, 126 checks).
+--     pwhash_str output are returned as Data (ASCII bytes); textDecode in
+--     livecodescript if a String is wanted;
+--   * MCMemoryAllocate's size is C `size_t`, so it marshals as UIntSize, NOT
+--     CUInt (a 4-byte size into an 8-byte slot on 64-bit corrupts the heap);
+--   * a foreign handler must NOT RETURN a bridged C string (ZStringUTF8 etc.):
+--     the engine adopts and free()s the returned pointer, so a static return is
+--     a free()-on-static crash. Fill a caller buffer and return length/-needed
+--     instead (the shim returns no const char*);
+--   * pass a null pointer as `nothing` only through an `optional Pointer`
+--     parameter (e.g. the unkeyed-hash key); a plain Pointer rejects `nothing`;
+--   * out parameters are passed by reference: command form `sxBoxKeypair tPk, tSk`,
+--     or inside a function call `put sxSecretStreamInitPush(tKey, tHeader) into h`.
+-- The native C layer is independently tested (KATs + ASan/UBSan, 160 checks);
+-- the current C ABI is SXT_ABI_VERSION 4 (kSXTABIVersion below must match).
 -- ==========================================================================
 
 library org.openxtalk.library.sodium
