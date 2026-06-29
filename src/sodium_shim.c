@@ -775,3 +775,487 @@ SXT_API int SXT_CALL sxt_pwhash_str_verify(const char *hashstr,
     return crypto_pwhash_str_verify(hashstr, (const char *)pass,
                                     (unsigned long long)passlen) == 0 ? 1 : 0;
 }
+
+/* ========================================================================== *
+ * Phase 3: streaming AEAD (secretstream) + file helpers.
+ * ========================================================================== */
+
+SXT_API int SXT_CALL sxt_secretstream_keybytes(void)
+{ return (int)crypto_secretstream_xchacha20poly1305_KEYBYTES; }
+SXT_API int SXT_CALL sxt_secretstream_headerbytes(void)
+{ return (int)crypto_secretstream_xchacha20poly1305_HEADERBYTES; }
+SXT_API int SXT_CALL sxt_secretstream_abytes(void)
+{ return (int)crypto_secretstream_xchacha20poly1305_ABYTES; }
+SXT_API int SXT_CALL sxt_secretstream_tag_message(void)
+{ return crypto_secretstream_xchacha20poly1305_TAG_MESSAGE; }
+SXT_API int SXT_CALL sxt_secretstream_tag_final(void)
+{ return crypto_secretstream_xchacha20poly1305_TAG_FINAL; }
+
+/*
+ * Generation-tagged handle table (CLAUDE.md "Handles for the stateful
+ * primitives"). The engine is single-threaded, so no locking is needed. A
+ * handle packs a 14-bit generation and a 1-based slot index; freeing a slot
+ * bumps its generation, so every previously issued handle for that slot fails
+ * lookup afterwards (a clean error, never a use-after-free). Handles are always
+ * positive (>= 65537), so they never collide with a negative -needed/error.
+ */
+#define SXT_STREAM_SLOTS 64
+#define SXT_STREAM_MODE_PUSH 1
+#define SXT_STREAM_MODE_PULL 2
+
+typedef struct {
+    int in_use;
+    int gen;        /* current generation; starts at 1, bumped on free */
+    int mode;       /* SXT_STREAM_MODE_PUSH or _PULL */
+    int last_tag;   /* tag from the most recent successful pull, else -1 */
+    crypto_secretstream_xchacha20poly1305_state state;
+} sxt_stream_slot;
+
+static sxt_stream_slot s_streams[SXT_STREAM_SLOTS];
+
+static int stream_make_handle(int idx, int gen)
+{
+    return ((gen & 0x3FFF) << 16) | ((idx + 1) & 0xFFFF);
+}
+
+static sxt_stream_slot *stream_lookup(int handle, int want_mode)
+{
+    int idx = (handle & 0xFFFF) - 1;
+    int gen = (handle >> 16) & 0x3FFF;
+    sxt_stream_slot *slot;
+    if (idx < 0 || idx >= SXT_STREAM_SLOTS) {
+        return NULL;
+    }
+    slot = &s_streams[idx];
+    if (!slot->in_use || slot->gen != gen) {
+        return NULL;                 /* stale or recycled handle */
+    }
+    if (want_mode != 0 && slot->mode != want_mode) {
+        return NULL;                 /* wrong direction (push vs pull) */
+    }
+    return slot;
+}
+
+static int stream_alloc(int mode)
+{
+    int i;
+    for (i = 0; i < SXT_STREAM_SLOTS; i++) {
+        if (!s_streams[i].in_use) {
+            if (s_streams[i].gen <= 0) {
+                s_streams[i].gen = 1;
+            }
+            s_streams[i].in_use = 1;
+            s_streams[i].mode = mode;
+            s_streams[i].last_tag = -1;
+            return stream_make_handle(i, s_streams[i].gen);
+        }
+    }
+    return 0;                        /* table full */
+}
+
+SXT_API void SXT_CALL sxt_free_stream(int handle)
+{
+    int idx = (handle & 0xFFFF) - 1;
+    int gen = (handle >> 16) & 0x3FFF;
+    if (idx < 0 || idx >= SXT_STREAM_SLOTS) {
+        return;                      /* unknown handle: clean no-op */
+    }
+    if (!s_streams[idx].in_use || s_streams[idx].gen != gen) {
+        return;                      /* already freed / stale: idempotent no-op */
+    }
+    sodium_memzero(&s_streams[idx].state, sizeof(s_streams[idx].state));
+    s_streams[idx].in_use = 0;
+    s_streams[idx].last_tag = -1;
+    s_streams[idx].gen++;            /* invalidate every outstanding handle */
+    if (s_streams[idx].gen > 0x3FFF) {
+        s_streams[idx].gen = 1;      /* wrap, staying positive */
+    }
+}
+
+SXT_API int SXT_CALL sxt_secretstream_init_push(unsigned char *header_out, int header_cap,
+                                                const unsigned char *key, int keylen)
+{
+    const int hb = (int)crypto_secretstream_xchacha20poly1305_HEADERBYTES;
+    int handle;
+    sxt_stream_slot *slot;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (keylen != (int)crypto_secretstream_xchacha20poly1305_KEYBYTES) {
+        set_error("sxt_secretstream_init_push: wrong key length");
+        return SXT_ERR_BADARG;
+    }
+    if (header_cap < hb) {
+        return -hb;
+    }
+    if (header_out == NULL || key == NULL) {
+        set_error("sxt_secretstream_init_push: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    handle = stream_alloc(SXT_STREAM_MODE_PUSH);
+    if (handle == 0) {
+        set_error("sxt_secretstream_init_push: too many open streams");
+        return SXT_ERR_BADARG;
+    }
+    slot = stream_lookup(handle, SXT_STREAM_MODE_PUSH);
+    if (slot == NULL ||
+        crypto_secretstream_xchacha20poly1305_init_push(&slot->state, header_out, key) != 0) {
+        sxt_free_stream(handle);
+        set_error("sxt_secretstream_init_push: init failed");
+        return SXT_ERR_BADARG;
+    }
+    return handle;
+}
+
+SXT_API int SXT_CALL sxt_secretstream_push(int handle, unsigned char *out, int cap,
+                                           const unsigned char *chunk, int chunklen,
+                                           const unsigned char *ad, int adlen, int tag)
+{
+    const int ab = (int)crypto_secretstream_xchacha20poly1305_ABYTES;
+    sxt_stream_slot *slot;
+    unsigned long long clen = 0;
+    int needed;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (chunklen < 0 || adlen < 0) {
+        set_error("sxt_secretstream_push: negative length");
+        return SXT_ERR_BADARG;
+    }
+    if (tag != crypto_secretstream_xchacha20poly1305_TAG_MESSAGE &&
+        tag != crypto_secretstream_xchacha20poly1305_TAG_FINAL &&
+        tag != crypto_secretstream_xchacha20poly1305_TAG_PUSH &&
+        tag != crypto_secretstream_xchacha20poly1305_TAG_REKEY) {
+        set_error("sxt_secretstream_push: unknown tag");
+        return SXT_ERR_BADARG;
+    }
+    slot = stream_lookup(handle, SXT_STREAM_MODE_PUSH);
+    if (slot == NULL) {
+        set_error("sxt_secretstream_push: bad or wrong-mode handle");
+        return SXT_ERR_BADHANDLE;
+    }
+    if (chunklen > SXT_MAX_BUFFER - ab) {
+        set_error("sxt_secretstream_push: chunk too large for a single buffer");
+        return SXT_ERR_BADARG;
+    }
+    needed = chunklen + ab;
+    if (cap < needed) {
+        return -needed;
+    }
+    if (out == NULL) {
+        set_error("sxt_secretstream_push: null output buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (chunklen > 0 && chunk == NULL) {
+        set_error("sxt_secretstream_push: null chunk");
+        return SXT_ERR_BADARG;
+    }
+    if (adlen > 0 && ad == NULL) {
+        set_error("sxt_secretstream_push: null associated data");
+        return SXT_ERR_BADARG;
+    }
+    if (crypto_secretstream_xchacha20poly1305_push(
+            &slot->state, out, &clen, chunk, (unsigned long long)chunklen,
+            ad, (unsigned long long)adlen, (unsigned char)tag) != 0) {
+        set_error("sxt_secretstream_push: encryption failed");
+        return SXT_ERR_BADARG;
+    }
+    return (int)clen;
+}
+
+SXT_API int SXT_CALL sxt_secretstream_init_pull(const unsigned char *header, int headerlen,
+                                                const unsigned char *key, int keylen)
+{
+    const int hb = (int)crypto_secretstream_xchacha20poly1305_HEADERBYTES;
+    int handle;
+    sxt_stream_slot *slot;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (keylen != (int)crypto_secretstream_xchacha20poly1305_KEYBYTES) {
+        set_error("sxt_secretstream_init_pull: wrong key length");
+        return SXT_ERR_BADARG;
+    }
+    if (headerlen != hb) {
+        set_error("sxt_secretstream_init_pull: wrong header length");
+        return SXT_ERR_BADARG;
+    }
+    if (header == NULL || key == NULL) {
+        set_error("sxt_secretstream_init_pull: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    handle = stream_alloc(SXT_STREAM_MODE_PULL);
+    if (handle == 0) {
+        set_error("sxt_secretstream_init_pull: too many open streams");
+        return SXT_ERR_BADARG;
+    }
+    slot = stream_lookup(handle, SXT_STREAM_MODE_PULL);
+    if (slot == NULL ||
+        crypto_secretstream_xchacha20poly1305_init_pull(&slot->state, header, key) != 0) {
+        sxt_free_stream(handle);
+        set_error("sxt_secretstream_init_pull: malformed header");
+        return SXT_ERR_BADARG;
+    }
+    return handle;
+}
+
+SXT_API int SXT_CALL sxt_secretstream_pull(int handle, unsigned char *out, int cap,
+                                           const unsigned char *in, int inlen,
+                                           const unsigned char *ad, int adlen)
+{
+    const int ab = (int)crypto_secretstream_xchacha20poly1305_ABYTES;
+    sxt_stream_slot *slot;
+    unsigned long long mlen = 0;
+    unsigned char tag = 0;
+    int plainlen;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (adlen < 0) {
+        set_error("sxt_secretstream_pull: negative length");
+        return SXT_ERR_BADARG;
+    }
+    slot = stream_lookup(handle, SXT_STREAM_MODE_PULL);
+    if (slot == NULL) {
+        set_error("sxt_secretstream_pull: bad or wrong-mode handle");
+        return SXT_ERR_BADHANDLE;
+    }
+    if (inlen < ab) {
+        set_error("sxt_secretstream_pull: chunk too short");
+        return SXT_ERR_BADARG;
+    }
+    plainlen = inlen - ab;
+    if (cap < plainlen) {
+        return -plainlen;
+    }
+    if (in == NULL) {
+        set_error("sxt_secretstream_pull: null input");
+        return SXT_ERR_BADARG;
+    }
+    if (plainlen > 0 && out == NULL) {
+        set_error("sxt_secretstream_pull: null output buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (adlen > 0 && ad == NULL) {
+        set_error("sxt_secretstream_pull: null associated data");
+        return SXT_ERR_BADARG;
+    }
+    if (crypto_secretstream_xchacha20poly1305_pull(
+            &slot->state, out, &mlen, &tag, in, (unsigned long long)inlen,
+            ad, (unsigned long long)adlen) != 0) {
+        set_error("sxt_secretstream_pull: wrong key or tampered chunk");
+        return SXT_ERR_AUTH;
+    }
+    slot->last_tag = (int)tag;
+    return (int)mlen;
+}
+
+SXT_API int SXT_CALL sxt_secretstream_last_tag(int handle)
+{
+    sxt_stream_slot *slot;
+    clear_error();
+    slot = stream_lookup(handle, 0);
+    if (slot == NULL) {
+        set_error("sxt_secretstream_last_tag: bad handle");
+        return SXT_ERR_BADHANDLE;
+    }
+    return slot->last_tag;
+}
+
+/* ---- File helpers (pure C; the plaintext never enters a LiveCode Data) --- */
+
+#define SXT_FILE_CHUNK 16384
+
+SXT_API int SXT_CALL sxt_encrypt_file(const char *src_path, const char *dst_path,
+                                      const unsigned char *key, int keylen)
+{
+    crypto_secretstream_xchacha20poly1305_state st;
+    unsigned char header[crypto_secretstream_xchacha20poly1305_HEADERBYTES];
+    unsigned char in[SXT_FILE_CHUNK];
+    unsigned char out[SXT_FILE_CHUNK + crypto_secretstream_xchacha20poly1305_ABYTES];
+    FILE *fsrc = NULL;
+    FILE *fdst = NULL;
+    size_t rlen;
+    unsigned long long clen;
+    unsigned char tag;
+    int eof;
+    int rc = SXT_OK;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (keylen != (int)crypto_secretstream_xchacha20poly1305_KEYBYTES) {
+        set_error("sxt_encrypt_file: wrong key length");
+        return SXT_ERR_BADARG;
+    }
+    if (src_path == NULL || dst_path == NULL || key == NULL) {
+        set_error("sxt_encrypt_file: null path or key");
+        return SXT_ERR_BADARG;
+    }
+    fsrc = fopen(src_path, "rb");
+    if (fsrc == NULL) {
+        set_error("sxt_encrypt_file: cannot open source file");
+        return SXT_ERR_IO;
+    }
+    fdst = fopen(dst_path, "wb");
+    if (fdst == NULL) {
+        fclose(fsrc);
+        set_error("sxt_encrypt_file: cannot open destination file");
+        return SXT_ERR_IO;
+    }
+
+    crypto_secretstream_xchacha20poly1305_init_push(&st, header, key);
+    if (fwrite(header, 1, sizeof(header), fdst) != sizeof(header)) {
+        set_error("sxt_encrypt_file: write error");
+        rc = SXT_ERR_IO;
+    } else {
+        do {
+            rlen = fread(in, 1, sizeof(in), fsrc);
+            if (ferror(fsrc)) {
+                set_error("sxt_encrypt_file: read error");
+                rc = SXT_ERR_IO;
+                break;
+            }
+            eof = feof(fsrc);
+            tag = eof ? (unsigned char)crypto_secretstream_xchacha20poly1305_TAG_FINAL
+                      : (unsigned char)crypto_secretstream_xchacha20poly1305_TAG_MESSAGE;
+            crypto_secretstream_xchacha20poly1305_push(&st, out, &clen, in,
+                                                       (unsigned long long)rlen,
+                                                       NULL, 0, tag);
+            if (fwrite(out, 1, (size_t)clen, fdst) != (size_t)clen) {
+                set_error("sxt_encrypt_file: write error");
+                rc = SXT_ERR_IO;
+                break;
+            }
+        } while (!eof);
+    }
+
+    sodium_memzero(&st, sizeof(st));
+    sodium_memzero(in, sizeof(in));
+    sodium_memzero(out, sizeof(out));
+    if (fclose(fdst) != 0 && rc == SXT_OK) {
+        set_error("sxt_encrypt_file: close error");
+        rc = SXT_ERR_IO;
+    }
+    fclose(fsrc);
+    if (rc != SXT_OK) {
+        remove(dst_path);                /* never leave a partial ciphertext */
+    }
+    return rc;
+}
+
+SXT_API int SXT_CALL sxt_decrypt_file(const char *src_path, const char *dst_path,
+                                      const unsigned char *key, int keylen)
+{
+    const int ab = (int)crypto_secretstream_xchacha20poly1305_ABYTES;
+    crypto_secretstream_xchacha20poly1305_state st;
+    unsigned char header[crypto_secretstream_xchacha20poly1305_HEADERBYTES];
+    unsigned char in[SXT_FILE_CHUNK + crypto_secretstream_xchacha20poly1305_ABYTES];
+    unsigned char out[SXT_FILE_CHUNK];
+    FILE *fsrc = NULL;
+    FILE *fdst = NULL;
+    size_t rlen;
+    unsigned long long mlen;
+    unsigned char tag = 0;
+    int eof;
+    int saw_final = 0;
+    int rc = SXT_OK;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (keylen != (int)crypto_secretstream_xchacha20poly1305_KEYBYTES) {
+        set_error("sxt_decrypt_file: wrong key length");
+        return SXT_ERR_BADARG;
+    }
+    if (src_path == NULL || dst_path == NULL || key == NULL) {
+        set_error("sxt_decrypt_file: null path or key");
+        return SXT_ERR_BADARG;
+    }
+    fsrc = fopen(src_path, "rb");
+    if (fsrc == NULL) {
+        set_error("sxt_decrypt_file: cannot open source file");
+        return SXT_ERR_IO;
+    }
+    fdst = fopen(dst_path, "wb");
+    if (fdst == NULL) {
+        fclose(fsrc);
+        set_error("sxt_decrypt_file: cannot open destination file");
+        return SXT_ERR_IO;
+    }
+
+    if (fread(header, 1, sizeof(header), fsrc) != sizeof(header)) {
+        /* too short even to hold the stream header: corrupt or truncated. */
+        set_error("sxt_decrypt_file: file is not a valid stream (no header)");
+        rc = SXT_ERR_AUTH;
+    } else if (crypto_secretstream_xchacha20poly1305_init_pull(&st, header, key) != 0) {
+        set_error("sxt_decrypt_file: malformed stream header");
+        rc = SXT_ERR_AUTH;
+    } else {
+        do {
+            rlen = fread(in, 1, sizeof(in), fsrc);
+            if (ferror(fsrc)) {
+                set_error("sxt_decrypt_file: read error");
+                rc = SXT_ERR_IO;
+                break;
+            }
+            eof = feof(fsrc);
+            if (rlen < (size_t)ab) {
+                /* a valid chunk is at least ABYTES (the final 0-length chunk is
+                 * still ABYTES); anything shorter means truncation/corruption. */
+                set_error("sxt_decrypt_file: truncated or corrupt stream");
+                rc = SXT_ERR_AUTH;
+                break;
+            }
+            if (crypto_secretstream_xchacha20poly1305_pull(&st, out, &mlen, &tag,
+                                                           in, (unsigned long long)rlen,
+                                                           NULL, 0) != 0) {
+                set_error("sxt_decrypt_file: wrong key or tampered data");
+                rc = SXT_ERR_AUTH;
+                break;
+            }
+            if (fwrite(out, 1, (size_t)mlen, fdst) != (size_t)mlen) {
+                set_error("sxt_decrypt_file: write error");
+                rc = SXT_ERR_IO;
+                break;
+            }
+            if (tag == (unsigned char)crypto_secretstream_xchacha20poly1305_TAG_FINAL) {
+                saw_final = 1;
+                break;                   /* clean end of stream */
+            }
+            if (eof) {
+                /* reached EOF without the FINAL tag: the stream was truncated. */
+                set_error("sxt_decrypt_file: stream truncated before its final chunk");
+                rc = SXT_ERR_AUTH;
+                break;
+            }
+        } while (!eof);
+        if (rc == SXT_OK && !saw_final) {
+            set_error("sxt_decrypt_file: stream ended without a final chunk");
+            rc = SXT_ERR_AUTH;
+        }
+    }
+
+    sodium_memzero(&st, sizeof(st));
+    sodium_memzero(in, sizeof(in));
+    sodium_memzero(out, sizeof(out));
+    if (fclose(fdst) != 0 && rc == SXT_OK) {
+        set_error("sxt_decrypt_file: close error");
+        rc = SXT_ERR_IO;
+    }
+    fclose(fsrc);
+    if (rc != SXT_OK) {
+        remove(dst_path);                /* never leave a partial plaintext */
+    }
+    return rc;
+}

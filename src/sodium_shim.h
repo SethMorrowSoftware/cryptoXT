@@ -271,6 +271,53 @@ SXT_API int SXT_CALL sxt_pwhash_str(char *out, int cap,
 SXT_API int SXT_CALL sxt_pwhash_str_verify(const char *hashstr,
                                            const unsigned char *pass, int passlen);
 
+/* --- Phase 3: streaming AEAD (secretstream) + file helpers ---------------- */
+
+/* secretstream (XChaCha20-Poly1305) length constants and chunk tags. */
+SXT_API int SXT_CALL sxt_secretstream_keybytes(void);
+SXT_API int SXT_CALL sxt_secretstream_headerbytes(void);
+SXT_API int SXT_CALL sxt_secretstream_abytes(void);
+SXT_API int SXT_CALL sxt_secretstream_tag_message(void);
+SXT_API int SXT_CALL sxt_secretstream_tag_final(void);
+
+/*
+ * Streaming AEAD. The state lives C-side in a generation-tagged handle table;
+ * script holds only the int handle, and a stale or recycled handle is a clean
+ * error, never a crash. The app must free what it opens (there is no
+ * deterministic LCB unload hook); sxt_free_stream is idempotent.
+ *
+ * init_push writes the HEADERBYTES header into header_out and returns a positive
+ * handle (or -needed / error). push encrypts one chunk: pass
+ * sxt_secretstream_tag_final() on the LAST chunk; that FINAL tag is what makes a
+ * truncated stream detectable on pull. init_pull opens a decrypt stream from the
+ * header; pull decrypts one chunk and records its tag (read it with
+ * sxt_secretstream_last_tag), returning SXT_ERR_AUTH on a wrong key or tampering.
+ */
+SXT_API int SXT_CALL sxt_secretstream_init_push(unsigned char *header_out, int header_cap,
+                                                const unsigned char *key, int keylen);
+SXT_API int SXT_CALL sxt_secretstream_push(int handle, unsigned char *out, int cap,
+                                           const unsigned char *chunk, int chunklen,
+                                           const unsigned char *ad, int adlen, int tag);
+SXT_API int SXT_CALL sxt_secretstream_init_pull(const unsigned char *header, int headerlen,
+                                                const unsigned char *key, int keylen);
+SXT_API int SXT_CALL sxt_secretstream_pull(int handle, unsigned char *out, int cap,
+                                           const unsigned char *in, int inlen,
+                                           const unsigned char *ad, int adlen);
+SXT_API int SXT_CALL sxt_secretstream_last_tag(int handle);
+SXT_API void SXT_CALL sxt_free_stream(int handle);
+
+/*
+ * C-side file encryption built on secretstream: libsodium reads src in chunks,
+ * encrypts, and writes dst, so a multi-gigabyte file never enters a LiveCode
+ * Data (the proper replacement for hand-rolled chunk framing). Paths are UTF-8.
+ * Returns SXT_OK, SXT_ERR_IO (open/read/write), SXT_ERR_AUTH (a corrupt or
+ * TRUNCATED input on decrypt: the missing FINAL tag is detected), or BADARG.
+ */
+SXT_API int SXT_CALL sxt_encrypt_file(const char *src_path, const char *dst_path,
+                                      const unsigned char *key, int keylen);
+SXT_API int SXT_CALL sxt_decrypt_file(const char *src_path, const char *dst_path,
+                                      const unsigned char *key, int keylen);
+
 #ifdef __cplusplus
 }
 #endif

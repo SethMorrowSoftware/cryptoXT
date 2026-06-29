@@ -421,6 +421,175 @@ static void test_pwhash(void)
           "verify rejects a wrong passphrase against the pinned string");
 }
 
+/* ========================================================================== *
+ * Phase 3: streaming AEAD (secretstream) + file helpers.
+ * ========================================================================== */
+
+static void test_secretstream(void)
+{
+    const unsigned char m1[5] = {'a', 'l', 'p', 'h', 'a'};
+    const unsigned char m2[6] = {'b', 'r', 'a', 'v', 'o', '!'};
+    const unsigned char m3[1] = {'z'};
+    unsigned char key[32];
+    unsigned char header[24];
+    unsigned char ct1[5 + 17];
+    unsigned char ct2[6 + 17];
+    unsigned char ct3[1 + 17];
+    unsigned char pt[8];
+    int tag_msg = sxt_secretstream_tag_message();
+    int tag_fin = sxt_secretstream_tag_final();
+    int hpush;
+    int hpull;
+    int h2;
+    int r;
+
+    printf("secretstream (streaming AEAD + handle table):\n");
+    memset(key, 0x44, sizeof(key));
+
+    hpush = sxt_secretstream_init_push(header, (int)sizeof(header), key, 32);
+    CHECK(hpush > 0, "init_push returns a positive handle");
+    CHECK(sxt_secretstream_push(hpush, ct1, (int)sizeof(ct1), m1, 5, NULL, 0, tag_msg) == 5 + 17,
+          "push chunk 1");
+    CHECK(sxt_secretstream_push(hpush, ct2, (int)sizeof(ct2), m2, 6, NULL, 0, tag_msg) == 6 + 17,
+          "push chunk 2");
+    CHECK(sxt_secretstream_push(hpush, ct3, (int)sizeof(ct3), m3, 1, NULL, 0, tag_fin) == 1 + 17,
+          "push final chunk");
+
+    /* A push handle must not be usable to pull. */
+    CHECK(sxt_secretstream_pull(hpush, pt, (int)sizeof(pt), ct1, (int)sizeof(ct1), NULL, 0)
+              == SXT_ERR_BADHANDLE,
+          "pull on a push handle -> BADHANDLE");
+
+    hpull = sxt_secretstream_init_pull(header, (int)sizeof(header), key, 32);
+    CHECK(hpull > 0, "init_pull returns a positive handle");
+
+    r = sxt_secretstream_pull(hpull, pt, (int)sizeof(pt), ct1, (int)sizeof(ct1), NULL, 0);
+    CHECK(r == 5 && memcmp(pt, m1, 5) == 0, "pull chunk 1 recovers plaintext");
+    CHECK(sxt_secretstream_last_tag(hpull) == tag_msg, "chunk 1 tag is MESSAGE");
+
+    r = sxt_secretstream_pull(hpull, pt, (int)sizeof(pt), ct2, (int)sizeof(ct2), NULL, 0);
+    CHECK(r == 6 && memcmp(pt, m2, 6) == 0, "pull chunk 2 recovers plaintext");
+
+    r = sxt_secretstream_pull(hpull, pt, (int)sizeof(pt), ct3, (int)sizeof(ct3), NULL, 0);
+    CHECK(r == 1 && pt[0] == 'z', "pull final chunk recovers plaintext");
+    CHECK(sxt_secretstream_last_tag(hpull) == tag_fin, "final chunk tag is FINAL");
+
+    /* A tampered chunk fails authentication on a fresh pull stream. */
+    h2 = sxt_secretstream_init_pull(header, (int)sizeof(header), key, 32);
+    ct1[20] ^= 0x01;
+    CHECK(sxt_secretstream_pull(h2, pt, (int)sizeof(pt), ct1, (int)sizeof(ct1), NULL, 0)
+              == SXT_ERR_AUTH,
+          "a tampered chunk -> SXT_ERR_AUTH");
+    ct1[20] ^= 0x01;
+    sxt_free_stream(h2);
+
+    sxt_free_stream(hpush);
+    sxt_free_stream(hpull);
+    sxt_free_stream(hpush);   /* idempotent: freeing again is a clean no-op */
+    CHECK(sxt_secretstream_last_tag(hpull) == SXT_ERR_BADHANDLE,
+          "a freed handle is now stale -> BADHANDLE");
+}
+
+static int write_pattern_file(const char *path, int n)
+{
+    FILE *f = fopen(path, "wb");
+    int i;
+    if (f == NULL) {
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        fputc((int)((unsigned char)((i * 37 + 11) & 0xFF)), f);
+    }
+    return fclose(f) == 0;
+}
+
+static int files_equal(const char *a, const char *b)
+{
+    FILE *fa = fopen(a, "rb");
+    FILE *fb = fopen(b, "rb");
+    int ca;
+    int cb;
+    int eq = 1;
+    if (fa == NULL || fb == NULL) {
+        if (fa != NULL) { fclose(fa); }
+        if (fb != NULL) { fclose(fb); }
+        return 0;
+    }
+    do {
+        ca = fgetc(fa);
+        cb = fgetc(fb);
+        if (ca != cb) { eq = 0; break; }
+    } while (ca != EOF);
+    fclose(fa);
+    fclose(fb);
+    return eq;
+}
+
+static long file_size(const char *p)
+{
+    FILE *f = fopen(p, "rb");
+    long n;
+    if (f == NULL) {
+        return -1;
+    }
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fclose(f);
+    return n;
+}
+
+static void test_file_helpers(void)
+{
+    const char *plain = "sxt_ft_plain.tmp";
+    const char *enc = "sxt_ft_enc.tmp";
+    const char *dec = "sxt_ft_dec.tmp";
+    const char *trunc = "sxt_ft_trunc.tmp";
+    unsigned char key[32];
+    unsigned char wrong[32];
+    long encsz;
+
+    printf("file helpers (secretstream, multi-chunk + truncation):\n");
+    memset(key, 0x55, sizeof(key));
+    memset(wrong, 0x66, sizeof(wrong));
+
+    CHECK(write_pattern_file(plain, 40000),
+          "wrote a 40000-byte plaintext (spans multiple chunks)");
+    CHECK(sxt_encrypt_file(plain, enc, key, 32) == SXT_OK, "encrypt_file succeeds");
+    CHECK(sxt_decrypt_file(enc, dec, key, 32) == SXT_OK, "decrypt_file succeeds");
+    CHECK(files_equal(plain, dec), "decrypted file matches the original byte for byte");
+
+    CHECK(sxt_decrypt_file(enc, dec, wrong, 32) == SXT_ERR_AUTH, "wrong key -> SXT_ERR_AUTH");
+
+    encsz = file_size(enc);
+    CHECK(encsz > 40, "ciphertext is non-trivial");
+    {
+        FILE *fi = fopen(enc, "rb");
+        FILE *fo = fopen(trunc, "wb");
+        long keep = encsz - 20;
+        long i;
+        int c;
+        if (fi != NULL && fo != NULL) {
+            for (i = 0; i < keep; i++) {
+                c = fgetc(fi);
+                if (c == EOF) { break; }
+                fputc(c, fo);
+            }
+        }
+        if (fi != NULL) { fclose(fi); }
+        if (fo != NULL) { fclose(fo); }
+        CHECK(sxt_decrypt_file(trunc, dec, key, 32) == SXT_ERR_AUTH,
+              "a truncated ciphertext -> SXT_ERR_AUTH (truncation detected)");
+        remove(trunc);
+    }
+
+    CHECK(sxt_decrypt_file("sxt_ft_no_such_file.tmp", dec, key, 32) == SXT_ERR_IO,
+          "missing source file -> SXT_ERR_IO");
+
+    remove(plain);
+    remove(enc);
+    remove(dec);
+}
+
 int main(void)
 {
     printf("SodiumXT smoke test\n");
@@ -436,6 +605,8 @@ int main(void)
     test_secretbox();
     test_aead();
     test_pwhash();
+    test_secretstream();
+    test_file_helpers();
 
     printf("-------------------\n");
     if (g_failures == 0) {
