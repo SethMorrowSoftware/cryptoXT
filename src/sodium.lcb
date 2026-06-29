@@ -7,25 +7,30 @@
 -- key derivation, key exchange, and padding.
 --
 -- ==========================================================================
--- NEEDS AN OXT PASS. There is no headless way to compile or run .lcb in this
--- environment, so this file is "verified statically" only: it passes
--- tools/check-livecodescript.py (smart quotes/dashes, handler/control/unsafe
--- balance, constant-before-use, the prefixed-token-shadow trap). The engine
--- specifics below CANNOT be verified here and must be reconciled, verbatim,
--- against the proven foreign declarations in our sibling extension TorrentXT
--- during a real OXT compile:
---   * the exact <builtin> signatures for MCMemoryAllocate / MCMemoryDeallocate /
---     MCDataGetByptr / MCDataGetLength / MCDataCreateWithBytes (especially the
---     integer WIDTH of size/length parameters: a size_t is not a CUInt);
---   * whether a `use` clause is needed for the foreign types;
---   * textEncode availability/signature and numeric-to-string coercion via `&`;
---   * out-parameter call syntax for the keypair / pull handlers.
--- The native C layer it binds to IS fully tested (KATs + ASan/UBSan); this is
--- the one layer awaiting an on-engine confirmation. Do not claim runtime
--- behaviour of this file until that pass is done.
+-- ON-ENGINE PASS, ROUND 1. This file is being reconciled against a real OXT
+-- compile. Resolved so far:
+--   * the module needs `end library` (an LCB library is a bracketed block);
+--   * the foreign types (Pointer/CInt/CUInt/CBool/ZStringUTF8) come from
+--     `use com.livecode.foreign`; the operators `&`/`&&`/`is`/`is not` from
+--     `use com.livecode.string`; arithmetic `+`/`-`/`*`/`<` from
+--     `use com.livecode.arithmetic`;
+--   * the in-buffer accessor is MCDataGetBytePtr (not ...Byptr);
+--   * textEncode/textDecode are NOT available to an LCB module, so text <-> Data
+--     conversion is kept OUT of this layer: byte values cross as Data, and text
+--     values that the C side takes as a C string cross as String (the engine
+--     bridges String -> UTF-8 at a ZStringUTF8 parameter). Hex/base64 and the
+--     pwhash_str output are therefore returned as Data (ASCII bytes); the caller
+--     can textDecode in livecodescript if a String is wanted.
+-- Still unconfirmed until the next compile: the exact <builtin> integer WIDTHS
+-- (size_t vs CUInt), CBool-in-conditional behaviour, and out-parameter call
+-- syntax. The native C layer it binds to IS fully tested (KATs + ASan/UBSan).
 -- ==========================================================================
 
 library org.openxtalk.library.sodium
+
+use com.livecode.foreign
+use com.livecode.string
+use com.livecode.arithmetic
 
 metadata version    is "0.1.0"
 metadata author     is "OpenXTalk"
@@ -42,12 +47,12 @@ constant kSXTErrBase is -2000000000
 -- --------------------------------------------------------------------------
 -- Engine memory + Data bridges (resolve by NAME, so NO leading underscore).
 -- An LCB Data does not auto-bridge to a void*, so an out buffer is a raw block
--- from MCMemoryAllocate passed as a Pointer, an in buffer is MCDataGetByptr +
+-- from MCMemoryAllocate passed as a Pointer, an in buffer is MCDataGetBytePtr +
 -- MCDataGetLength, and written bytes are copied back with MCDataCreateWithBytes.
 -- --------------------------------------------------------------------------
 foreign handler MCMemoryAllocate(in pSize as CUInt, out rPtr as Pointer) returns CBool binds to "<builtin>"
 foreign handler MCMemoryDeallocate(in pPtr as Pointer) returns nothing binds to "<builtin>"
-foreign handler MCDataGetByptr(in pData as Data) returns Pointer binds to "<builtin>"
+foreign handler MCDataGetBytePtr(in pData as Data) returns Pointer binds to "<builtin>"
 foreign handler MCDataGetLength(in pData as Data) returns CUInt binds to "<builtin>"
 foreign handler MCDataCreateWithBytes(in pBytes as Pointer, in pLen as CUInt, out rData as Data) returns CBool binds to "<builtin>"
 
@@ -146,7 +151,7 @@ private handler sPrepare() returns nothing
       put _sxt_abi_version() into tAbi
    end unsafe
    if tAbi is not kSXTABIVersion then
-      throw "SodiumXT ABI mismatch: native library reports" && tAbi & ", extension expects" && kSXTABIVersion & ". Reinstall the packaged extension."
+      throw "SodiumXT ABI mismatch: the native sodiumxt library does not match this extension. Reinstall the packaged extension."
    end if
    unsafe
       put _sxt_init() into tRc
@@ -171,7 +176,7 @@ private handler sAlloc(in pCap as Integer) returns Pointer
       put MCMemoryAllocate(pCap, tPtr) into tOk
    end unsafe
    if not tOk then
-      throw "SodiumXT: out of memory allocating" && pCap && "bytes."
+      throw "SodiumXT: out of memory allocating an output buffer."
    end if
    return tPtr
 end handler
@@ -185,7 +190,7 @@ end handler
 private handler sDataPtr(in pData as Data) returns Pointer
    variable tPtr as Pointer
    unsafe
-      put MCDataGetByptr(pData) into tPtr
+      put MCDataGetBytePtr(pData) into tPtr
    end unsafe
    return tPtr
 end handler
@@ -303,12 +308,14 @@ public handler sxHashKeyed(in pData as Data, in pKey as Data, in pOutLen as Inte
    return sFinish("sxHashKeyed", tOut, tWritten)
 end handler
 
-public handler sxBin2Hex(in pData as Data) returns String
+-- Hex-encode bytes. Returns the ASCII hex as Data (it reads as text in script;
+-- textDecode it in livecodescript if you need a String). textEncode/textDecode
+-- are not available to an LCB module, so this layer stays in Data.
+public handler sxBin2Hex(in pData as Data) returns Data
    variable tOut as Pointer
    variable tInPtr as Pointer
    variable tInLen as Integer
    variable tWritten as Integer
-   variable tHexData as Data
    sPrepare()
    put sDataLen(pData) into tInLen
    put sDataPtr(pData) into tInPtr
@@ -316,20 +323,18 @@ public handler sxBin2Hex(in pData as Data) returns String
    unsafe
       put _sxt_bin2hex(tOut, tInLen * 2 + 1, tInPtr, tInLen) into tWritten
    end unsafe
-   put sFinish("sxBin2Hex", tOut, tWritten) into tHexData
-   return textDecode(tHexData, "ascii")
+   return sFinish("sxBin2Hex", tOut, tWritten)
 end handler
 
-public handler sxHex2Bin(in pHex as String) returns Data
+-- Decode hex (the ASCII hex bytes, as Data) back to bytes.
+public handler sxHex2Bin(in pHex as Data) returns Data
    variable tOut as Pointer
-   variable tInData as Data
    variable tInPtr as Pointer
    variable tInLen as Integer
    variable tWritten as Integer
    sPrepare()
-   put textEncode(pHex, "ascii") into tInData
-   put sDataLen(tInData) into tInLen
-   put sDataPtr(tInData) into tInPtr
+   put sDataLen(pHex) into tInLen
+   put sDataPtr(pHex) into tInPtr
    put sAlloc(tInLen + 1) into tOut
    unsafe
       put _sxt_hex2bin(tOut, tInLen + 1, tInPtr, tInLen) into tWritten
@@ -338,13 +343,13 @@ public handler sxHex2Bin(in pHex as String) returns Data
 end handler
 
 -- base64, URL-safe with no padding (the friendly default for share codes).
-public handler sxBin2Base64(in pData as Data) returns String
+-- Returns the ASCII base64 as Data (textDecode in script for a String).
+public handler sxBin2Base64(in pData as Data) returns Data
    variable tOut as Pointer
    variable tInPtr as Pointer
    variable tInLen as Integer
    variable tVariant as Integer
    variable tWritten as Integer
-   variable tB64 as Data
    sPrepare()
    put sDataLen(pData) into tInLen
    put sDataPtr(pData) into tInPtr
@@ -355,21 +360,19 @@ public handler sxBin2Base64(in pData as Data) returns String
    unsafe
       put _sxt_bin2base64(tOut, tInLen * 2 + 8, tInPtr, tInLen, tVariant) into tWritten
    end unsafe
-   put sFinish("sxBin2Base64", tOut, tWritten) into tB64
-   return textDecode(tB64, "ascii")
+   return sFinish("sxBin2Base64", tOut, tWritten)
 end handler
 
-public handler sxBase642Bin(in pB64 as String) returns Data
+-- Decode base64 (the ASCII base64 bytes, as Data) back to bytes.
+public handler sxBase642Bin(in pB64 as Data) returns Data
    variable tOut as Pointer
-   variable tInData as Data
    variable tInPtr as Pointer
    variable tInLen as Integer
    variable tVariant as Integer
    variable tWritten as Integer
    sPrepare()
-   put textEncode(pB64, "ascii") into tInData
-   put sDataLen(tInData) into tInLen
-   put sDataPtr(tInData) into tInPtr
+   put sDataLen(pB64) into tInLen
+   put sDataPtr(pB64) into tInPtr
    unsafe
       put _sxt_base64_variant_urlsafe_no_padding() into tVariant
    end unsafe
@@ -403,15 +406,16 @@ end handler
 -- Password hashing / KDF (Argon2id).
 -- ==========================================================================
 
--- Preset selectors (return the opslimit as an Integer and the memlimit as a
--- decimal String, ready to pass to sxPwHash / sxPwHashStr).
-public handler sxPwOpsModerate() returns Integer
-   variable tOps as Integer
+-- Memlimit presets, returned as decimal Strings ready to pass to sxPwHash /
+-- sxPwHashStr. The opslimit preset is a tiny decimal you pass as a String
+-- literal: "2" (interactive), "3" (moderate), "4" (sensitive).
+public handler sxPwMemInteractive() returns String
+   variable tMem as String
    sPrepare()
    unsafe
-      put _sxt_pwhash_opslimit_moderate() into tOps
+      put _sxt_pwhash_memlimit_interactive() into tMem
    end unsafe
-   return tOps
+   return tMem
 end handler
 
 public handler sxPwMemModerate() returns String
@@ -421,15 +425,6 @@ public handler sxPwMemModerate() returns String
       put _sxt_pwhash_memlimit_moderate() into tMem
    end unsafe
    return tMem
-end handler
-
-public handler sxPwOpsSensitive() returns Integer
-   variable tOps as Integer
-   sPrepare()
-   unsafe
-      put _sxt_pwhash_opslimit_sensitive() into tOps
-   end unsafe
-   return tOps
 end handler
 
 public handler sxPwMemSensitive() returns String
@@ -444,66 +439,62 @@ end handler
 -- Derive a pKeyLen-byte key from a passphrase + salt (store the salt and the
 -- ops/mem beside the data so you can re-derive and raise the cost later). The
 -- passphrase is pinned to UTF-8 so it derives the same key on every machine.
-public handler sxPwHash(in pPassphrase as String, in pSalt as Data, in pKeyLen as Integer, in pOpsLimit as Integer, in pMemLimit as String) returns Data
+-- Derive a pKeyLen-byte key from a passphrase + salt (store the salt and the
+-- ops/mem beside the data so you can re-derive and raise the cost later). The
+-- passphrase is a Data: pass textEncode(thePassword, "utf-8") in your script so
+-- the same passphrase derives the same key on every machine. opslimit/memlimit
+-- are decimal Strings (e.g. "3" and sxPwMemModerate()).
+public handler sxPwHash(in pPassphrase as Data, in pSalt as Data, in pKeyLen as Integer, in pOpsLimit as String, in pMemLimit as String) returns Data
    variable tOut as Pointer
-   variable tPass as Data
    variable tPassPtr as Pointer
    variable tPassLen as Integer
    variable tSaltPtr as Pointer
    variable tSaltLen as Integer
-   variable tOpsStr as String
    variable tWritten as Integer
    sPrepare()
-   put textEncode(pPassphrase, "utf-8") into tPass
-   put sDataLen(tPass) into tPassLen
-   put sDataPtr(tPass) into tPassPtr
+   put sDataLen(pPassphrase) into tPassLen
+   put sDataPtr(pPassphrase) into tPassPtr
    put sDataLen(pSalt) into tSaltLen
    put sDataPtr(pSalt) into tSaltPtr
-   put "" & pOpsLimit into tOpsStr
    put sAlloc(pKeyLen + 1) into tOut
    unsafe
-      put _sxt_pwhash(tOut, pKeyLen + 1, pKeyLen, tPassPtr, tPassLen, tSaltPtr, tSaltLen, tOpsStr, pMemLimit) into tWritten
+      put _sxt_pwhash(tOut, pKeyLen + 1, pKeyLen, tPassPtr, tPassLen, tSaltPtr, tSaltLen, pOpsLimit, pMemLimit) into tWritten
    end unsafe
    return sFinish("sxPwHash", tOut, tWritten)
 end handler
 
--- Hash a passphrase into a self-describing string for storage (it packs the
--- salt and the ops/mem, so a single string is enough to verify later).
-public handler sxPwHashStr(in pPassphrase as String, in pOpsLimit as Integer, in pMemLimit as String) returns String
+-- Hash a passphrase (Data; textEncode it in script) into a self-describing
+-- string for storage (it packs the salt and the ops/mem). Returns the ASCII
+-- hash string as Data; store it, and pass it back to sxPwHashStrVerify as a
+-- String (textDecode the stored Data in livecodescript).
+public handler sxPwHashStr(in pPassphrase as Data, in pOpsLimit as String, in pMemLimit as String) returns Data
    variable tOut as Pointer
-   variable tPass as Data
    variable tPassPtr as Pointer
    variable tPassLen as Integer
    variable tCap as Integer
-   variable tOpsStr as String
    variable tWritten as Integer
-   variable tStr as Data
    sPrepare()
-   put textEncode(pPassphrase, "utf-8") into tPass
-   put sDataLen(tPass) into tPassLen
-   put sDataPtr(tPass) into tPassPtr
-   put "" & pOpsLimit into tOpsStr
+   put sDataLen(pPassphrase) into tPassLen
+   put sDataPtr(pPassphrase) into tPassPtr
    unsafe
       put _sxt_pwhash_strbytes() into tCap
    end unsafe
    put sAlloc(tCap) into tOut
    unsafe
-      put _sxt_pwhash_str(tOut, tCap, tPassPtr, tPassLen, tOpsStr, pMemLimit) into tWritten
+      put _sxt_pwhash_str(tOut, tCap, tPassPtr, tPassLen, pOpsLimit, pMemLimit) into tWritten
    end unsafe
-   put sFinish("sxPwHashStr", tOut, tWritten) into tStr
-   return textDecode(tStr, "ascii")
+   return sFinish("sxPwHashStr", tOut, tWritten)
 end handler
 
--- Verify a passphrase against a stored sxPwHashStr string (constant time).
-public handler sxPwHashStrVerify(in pHash as String, in pPassphrase as String) returns Boolean
-   variable tPass as Data
+-- Verify a passphrase (Data; textEncode it) against a stored sxPwHashStr string
+-- (pass the stored hash as a String) in constant time.
+public handler sxPwHashStrVerify(in pHash as String, in pPassphrase as Data) returns Boolean
    variable tPassPtr as Pointer
    variable tPassLen as Integer
    variable tR as Integer
    sPrepare()
-   put textEncode(pPassphrase, "utf-8") into tPass
-   put sDataLen(tPass) into tPassLen
-   put sDataPtr(tPass) into tPassPtr
+   put sDataLen(pPassphrase) into tPassLen
+   put sDataPtr(pPassphrase) into tPassPtr
    unsafe
       put _sxt_pwhash_str_verify(pHash, tPassPtr, tPassLen) into tR
    end unsafe
@@ -1183,3 +1174,5 @@ public handler sxUnpad(in pData as Data, in pBlockSize as Integer) returns Data
    -- keep the first tUnpadded bytes of the input
    return sToData(tInPtr, tUnpadded)
 end handler
+
+end library

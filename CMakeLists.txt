@@ -46,6 +46,20 @@ endif()
 # ---------------------------------------------------------------------------
 include(ExternalProject)
 
+# libsodium's autotools build must be driven by `make`, NOT by the outer
+# project's generator tool: ${CMAKE_MAKE_PROGRAM} is `ninja` under -G Ninja,
+# which cannot build an autotools-generated Makefile (and `ninja -j` is a usage
+# error). Resolve a real make and an explicit, portable job count.
+find_program(SODIUMXT_MAKE NAMES gmake make)
+if(NOT SODIUMXT_MAKE)
+    set(SODIUMXT_MAKE make)
+endif()
+include(ProcessorCount)
+ProcessorCount(SODIUMXT_NPROC)
+if(SODIUMXT_NPROC EQUAL 0)
+    set(SODIUMXT_NPROC 2)
+endif()
+
 set(_sodium_prefix  "${CMAKE_BINARY_DIR}/libsodium")
 set(_sodium_install "${_sodium_prefix}/install")
 set(_sodium_include "${_sodium_install}/include")
@@ -72,8 +86,8 @@ else()
                           --enable-static --disable-shared
                           --with-pic
                           --disable-dependency-tracking
-        BUILD_COMMAND     ${CMAKE_MAKE_PROGRAM} -j
-        INSTALL_COMMAND   ${CMAKE_MAKE_PROGRAM} install
+        BUILD_COMMAND     ${SODIUMXT_MAKE} -j ${SODIUMXT_NPROC}
+        INSTALL_COMMAND   ${SODIUMXT_MAKE} install
         INSTALL_DIR       "${_sodium_install}"
         BUILD_BYPRODUCTS  "${_sodium_lib}"
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE

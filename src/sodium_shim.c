@@ -242,7 +242,7 @@ SXT_API int SXT_CALL sxt_bin2hex(char *out, int cap,
         return SXT_ERR_BADARG;
     }
     /* hex is inlen*2 chars plus a NUL; guard the multiply against overflow. */
-    if (inlen > (SXT_MAX_BUFFER - 1) / 2) {
+    if (inlen >= (SXT_MAX_BUFFER - 1) / 2) {
         set_error("sxt_bin2hex: input too large for a single buffer");
         return SXT_ERR_BADARG;
     }
@@ -420,7 +420,7 @@ SXT_API int SXT_CALL sxt_secretbox(unsigned char *out, int cap,
         return SXT_ERR_BADARG;
     }
     /* Guard the framed length against int overflow before we negate it. */
-    if (msglen > SXT_MAX_BUFFER - noncebytes - macbytes) {
+    if (msglen >= SXT_MAX_BUFFER - noncebytes - macbytes) {
         set_error("sxt_secretbox: message too large for a single buffer");
         return SXT_ERR_BADARG;
     }
@@ -519,7 +519,7 @@ SXT_API int SXT_CALL sxt_aead_encrypt(unsigned char *out, int cap,
         set_error("sxt_aead_encrypt: wrong key length");
         return SXT_ERR_BADARG;
     }
-    if (msglen > SXT_MAX_BUFFER - npub - abytes) {
+    if (msglen >= SXT_MAX_BUFFER - npub - abytes) {
         set_error("sxt_aead_encrypt: message too large for a single buffer");
         return SXT_ERR_BADARG;
     }
@@ -938,7 +938,7 @@ SXT_API int SXT_CALL sxt_secretstream_push(int handle, unsigned char *out, int c
         set_error("sxt_secretstream_push: bad or wrong-mode handle");
         return SXT_ERR_BADHANDLE;
     }
-    if (chunklen > SXT_MAX_BUFFER - ab) {
+    if (chunklen >= SXT_MAX_BUFFER - ab) {
         set_error("sxt_secretstream_push: chunk too large for a single buffer");
         return SXT_ERR_BADARG;
     }
@@ -1310,7 +1310,7 @@ SXT_API int SXT_CALL sxt_box(unsigned char *out, int cap,
         set_error("sxt_box: wrong key length");
         return SXT_ERR_BADARG;
     }
-    if (msglen > SXT_MAX_BUFFER - noncebytes - macbytes) {
+    if (msglen >= SXT_MAX_BUFFER - noncebytes - macbytes) {
         set_error("sxt_box: message too large for a single buffer");
         return SXT_ERR_BADARG;
     }
@@ -1396,7 +1396,7 @@ SXT_API int SXT_CALL sxt_box_seal(unsigned char *out, int cap,
         set_error("sxt_box_seal: wrong public key length");
         return SXT_ERR_BADARG;
     }
-    if (msglen > SXT_MAX_BUFFER - sealbytes) {
+    if (msglen >= SXT_MAX_BUFFER - sealbytes) {
         set_error("sxt_box_seal: message too large for a single buffer");
         return SXT_ERR_BADARG;
     }
@@ -1584,7 +1584,7 @@ SXT_API int SXT_CALL sxt_sign(unsigned char *out, int cap,
         set_error("sxt_sign: wrong secret key length");
         return SXT_ERR_BADARG;
     }
-    if (msglen > SXT_MAX_BUFFER - sigbytes) {
+    if (msglen >= SXT_MAX_BUFFER - sigbytes) {
         set_error("sxt_sign: message too large for a single buffer");
         return SXT_ERR_BADARG;
     }
@@ -1800,7 +1800,7 @@ SXT_API int SXT_CALL sxt_pad(unsigned char *out, int cap,
         return SXT_ERR_BADARG;
     }
     /* sodium_pad always adds 1..blocksize bytes, rounding up to a multiple. */
-    if (inlen / blocksize > (SXT_MAX_BUFFER / blocksize) - 1) {
+    if (inlen / blocksize >= (SXT_MAX_BUFFER / blocksize) - 1) {
         set_error("sxt_pad: result too large for a single buffer");
         return SXT_ERR_BADARG;
     }
