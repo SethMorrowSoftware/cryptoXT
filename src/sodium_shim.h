@@ -9,10 +9,12 @@
  * full rationale; the operative parts are restated here so a reader of the
  * header alone cannot misuse the contract.
  *
- * Phase 0 surface ONLY: init, version, sodium_version, abi_version,
- * last_error, randombytes. Everything else (hashing, secretbox, pwhash,
- * secretstream, box, sign) is downstream of proving the buffer round-trip,
- * which is the plan's Phase 0 gate, so it is intentionally absent here.
+ * Full surface: init/version/randomness; BLAKE2b hashing (one-shot, keyed,
+ * multipart, and whole-file) + hex/base64 + constant-time compare; secretbox
+ * and AEAD; Argon2id (pwhash / pwhash_str) and the KDF; streaming AEAD
+ * (secretstream) and the C-side file helpers; X25519 boxes and sealed boxes;
+ * ed25519 signatures; key exchange; and padding. The ABI is versioned by
+ * SXT_ABI_VERSION below; bump it on any signature change.
  */
 #ifndef SODIUMXT_SODIUM_SHIM_H
 #define SODIUMXT_SODIUM_SHIM_H
