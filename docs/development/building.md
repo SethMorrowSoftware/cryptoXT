@@ -2,7 +2,7 @@
 
 This documents the heavy part (acquiring and building libsodium) and the day to
 day loop (sanitizers, the static gate, packaging). For the design and the phased
-plan see `docs/SodiumXT-IMPLEMENTATION-PLAN.md`; for the hard-won lessons see
+plan see `docs/development/implementation-plan.md`; for the hard-won lessons see
 `CLAUDE.md`.
 
 House style: no em-dashes (hyphens, commas, colons, parentheses instead).

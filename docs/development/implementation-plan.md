@@ -230,7 +230,7 @@ binary repackaged in the same change.
 - **Sanitizer build target** for local iteration (gcc).
 - **`tools/package-extension.py`** refreshes the committed
   `src/code/<arch>-<platform>/sodiumxt.*` in the same change as any native edit.
-- **`docs/building.md`** documents the heavy part (the libsodium acquisition), like
+- **`docs/development/building.md`** documents the heavy part (the libsodium acquisition), like
   TorrentXT's.
 
 ## 8. Risk register
