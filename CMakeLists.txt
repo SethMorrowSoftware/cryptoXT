@@ -3,7 +3,7 @@
 # What this produces: ONE shared library, statically linking a PINNED libsodium,
 # named with the bare token "sodiumxt" (no "lib" prefix), so the packaged
 # extension can resolve "c:sodiumxt>" with no external runtime dependency. See
-# docs/SodiumXT-IMPLEMENTATION-PLAN.md sections 3 and 7, and CLAUDE.md.
+# docs/development/implementation-plan.md sections 3 and 7, and CLAUDE.md.
 #
 # libsodium's own build is autotools. On Linux and macOS we drive that via
 # ExternalProject (the known-good path), then import the resulting static lib;
