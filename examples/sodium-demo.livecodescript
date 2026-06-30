@@ -255,15 +255,19 @@ on buildSignTab
 end buildSignTab
 
 on buildHashTab
-   makeLabel "hash:h", "48,126,748,154", "Hashing and whole-file encryption", "ink", 16, "bold"
-   makeLabel "hash:exp", "48,158,748,224", "BLAKE2b is a fast cryptographic fingerprint. Type text and Hash it - then change one character and hash again to see a completely different digest. Or pick a file to hash or encrypt: files are processed chunk-by-chunk in C, so size is no object.", "muted", 12, "plain"
-   makeLabel "hash:lm", "48,234,400,256", "Text to hash", "ink", 12, "bold"
-   makeInput "hash:msg", "48,258,748,298", "The quick brown fox jumps over the lazy dog"
-   makeButton "hash:hash", "48,310,280,342", "Hash text (BLAKE2b-256)", true
-   makeMono "hash:out", "48,352,748,468"
-   makeButton "hash:hashfile", "48,480,260,512", "Hash a file...", false
-   makeButton "hash:encfile", "272,480,484,512", "Encrypt a file...", false
-   makeLabel "hash:status", "48,556,748,596", "Hash the text above, or pick a file to hash or encrypt.", "muted", 12, "plain"
+   makeLabel "hash:h", "48,126,748,154", "Hashing and file encryption", "ink", 16, "bold"
+   makeLabel "hash:exp", "48,158,748,214", "BLAKE2b is a fast cryptographic fingerprint - hash text or a whole file (streamed in C, so size is no object). Below, encrypt or decrypt a file with a passphrase: Argon2id derives the key and the salt is stored in the .enc, so the same passphrase decrypts it.", "muted", 12, "plain"
+   makeLabel "hash:lm", "48,220,400,240", "Text to hash", "ink", 12, "bold"
+   makeInput "hash:msg", "48,242,748,280", "The quick brown fox jumps over the lazy dog"
+   makeButton "hash:hash", "48,290,260,320", "Hash text (BLAKE2b-256)", true
+   makeMono "hash:out", "48,328,748,416"
+   makeLabel "hash:lf", "48,424,748,444", "File encryption (passphrase)", "ink", 13, "bold"
+   makeLabel "hash:lpass", "48,452,150,472", "Passphrase", "ink", 12, "bold"
+   makeInput "hash:pass", "150,450,470,478", "correct horse battery staple"
+   makeButton "hash:hashfile", "48,488,210,518", "Hash a file...", false
+   makeButton "hash:encfile", "220,488,400,518", "Encrypt a file...", true
+   makeButton "hash:decfile", "410,488,590,518", "Decrypt a file...", false
+   makeLabel "hash:status", "48,556,748,596", "Hash text above, or use a passphrase to encrypt or decrypt a file (you choose where to save).", "muted", 12, "plain"
 end buildHashTab
 
 on buildAboutTab
@@ -553,6 +557,8 @@ on handleHash pRole
       doHashFile
    else if pRole is "encfile" then
       doEncFile
+   else if pRole is "decfile" then
+      doDecFile
    end if
 end handleHash
 
@@ -576,23 +582,97 @@ on doHashFile
    end try
 end doHashFile
 
+-- Encrypt a file with a passphrase. The .enc is self-contained: a 16-byte
+-- random salt is stored at the front, then the authenticated secretstream.
+-- You choose where to save it (ask file).
 on doEncFile
-   local tPath
+   local tSrc
+   local tDest
+   local tTmp
+   local tSalt
    local tKey
-   answer file "Choose a file to encrypt (a .enc copy is written beside it):"
-   put it into tPath
-   if tPath is empty then
+   if field "hash:pass" is empty then
+      setStatus "hash:status", "Enter a passphrase for the file first.", "bad"
       exit doEncFile
    end if
-   put sxRandomBytes(32) into tKey
+   answer file "Choose a file to encrypt:"
+   put it into tSrc
+   if tSrc is empty then
+      exit doEncFile
+   end if
+   ask file "Save the encrypted file as:" with (tSrc & ".enc")
+   put it into tDest
+   if tDest is empty then
+      exit doEncFile
+   end if
+   put tDest & ".tmp" into tTmp
+   put sxRandomBytes(16) into tSalt
+   put sxPwHash(textEncode(field "hash:pass", "utf-8"), tSalt, 32, "2", sxPwMemInteractive()) into tKey
    try
-      sxEncryptFile tPath, (tPath & ".enc"), tKey
-      put "Encrypted:" && return & tPath & return & "  ->  " & tPath & ".enc" & return & return & "Key (hex, keep it safe - this demo does not store it):" & return & textDecode(sxBin2Hex(tKey), "ascii") into field "hash:out"
-      setStatus "hash:status", "Encrypted with a random key, streamed C-side. The .enc file is authenticated (truncation is detectable).", "ok"
+      sxEncryptFile tSrc, tTmp, tKey
+      put tSalt & url ("binfile:" & tTmp) into url ("binfile:" & tDest)
+      put "Encrypted (passphrase-derived key, salt stored in the file):" & return & tSrc & return & "  ->  " & tDest into field "hash:out"
+      setStatus "hash:status", "Encrypted. Decrypt a file with the SAME passphrase to recover it.", "ok"
    catch tErr
       setStatus "hash:status", "Could not encrypt that file:" && tErr, "bad"
    end try
+   if there is a file tTmp then
+      delete file tTmp
+   end if
 end doEncFile
+
+-- Decrypt a .enc made above: read off the salt, re-derive the key from the
+-- passphrase, and decrypt the rest. A wrong passphrase, or a tampered or
+-- truncated file, is rejected. You choose where to save the result.
+on doDecFile
+   local tEnc
+   local tDest
+   local tTmp
+   local tRaw
+   local tSalt
+   local tBody
+   local tKey
+   local tSuggest
+   if field "hash:pass" is empty then
+      setStatus "hash:status", "Enter the passphrase the file was encrypted with.", "bad"
+      exit doDecFile
+   end if
+   answer file "Choose a .enc file to decrypt:"
+   put it into tEnc
+   if tEnc is empty then
+      exit doDecFile
+   end if
+   put url ("binfile:" & tEnc) into tRaw
+   if the number of bytes in tRaw < 17 then
+      setStatus "hash:status", "That file is too small to be a SodiumXT .enc file.", "bad"
+      exit doDecFile
+   end if
+   put byte 1 to 16 of tRaw into tSalt
+   put byte 17 to -1 of tRaw into tBody
+   if tEnc ends with ".enc" then
+      put char 1 to -5 of tEnc into tSuggest
+   else
+      put tEnc & ".decrypted" into tSuggest
+   end if
+   ask file "Save the decrypted file as:" with tSuggest
+   put it into tDest
+   if tDest is empty then
+      exit doDecFile
+   end if
+   put tDest & ".tmp" into tTmp
+   put tBody into url ("binfile:" & tTmp)
+   put sxPwHash(textEncode(field "hash:pass", "utf-8"), tSalt, 32, "2", sxPwMemInteractive()) into tKey
+   try
+      sxDecryptFile tTmp, tDest, tKey
+      put "Decrypted and authenticated:" & return & tEnc & return & "  ->  " & tDest into field "hash:out"
+      setStatus "hash:status", "Decrypted successfully - the authentication tag verified.", "ok"
+   catch tErr
+      setStatus "hash:status", "REJECTED: wrong passphrase, or the file was tampered with or truncated.", "bad"
+   end try
+   if there is a file tTmp then
+      delete file tTmp
+   end if
+end doDecFile
 
 -- ==========================================================================
 -- About tab: a compact self-test against the live library.
