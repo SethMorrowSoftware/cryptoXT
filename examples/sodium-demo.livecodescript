@@ -28,6 +28,7 @@ local sApk          -- Alice public key (Public Key tab)
 local sAsk          -- Alice secret key
 local sBpk          -- Bob public key
 local sBsk          -- Bob secret key
+local sBoxCt        -- last box ciphertext, base64 (canonical, not the display field)
 local sSignPk       -- signing public key (Signatures tab)
 local sSignSk       -- signing secret key
 local sSignSig      -- last signature
@@ -391,7 +392,7 @@ on doDecrypt
       setStatus "enc:status", "Nothing to decrypt yet - click Encrypt first.", "bad"
       exit doDecrypt
    end if
-   put sxBase642Bin(textEncode(field "enc:out", "ascii")) into tRaw
+   put sxBase642Bin(textEncode(sEncBlob, "ascii")) into tRaw
    if the number of bytes in tRaw < 17 then
       setStatus "enc:status", "That is not a valid sealed blob.", "bad"
       exit doDecrypt
@@ -416,7 +417,7 @@ on doTamper
       setStatus "enc:status", "Encrypt something first, then flip a byte.", "bad"
       exit doTamper
    end if
-   put sxBase642Bin(textEncode(field "enc:out", "ascii")) into tRaw
+   put sxBase642Bin(textEncode(sEncBlob, "ascii")) into tRaw
    put the number of bytes in tRaw into tLen
    put 17 + (tLen - 17) div 2 into tPos
    put numToByte(byteToNum(byte tPos of tRaw) bitXor 1) into byte tPos of tRaw
@@ -456,17 +457,18 @@ on doBox
       exit doBox
    end if
    put sxBox(textEncode(field "key:msg", "utf-8"), sBpk, sAsk) into tBox
-   put textDecode(sxBin2Base64(tBox), "ascii") into field "key:out"
+   put textDecode(sxBin2Base64(tBox), "ascii") into sBoxCt
+   put sBoxCt into field "key:out"
    setStatus "key:status", "Encrypted to Bob's public key with Alice's secret key. Click Bob opens.", "ok"
 end doBox
 
 on doBoxOpen
    local tBox
-   if field "key:out" is empty then
+   if sBoxCt is empty then
       setStatus "key:status", "Encrypt a message first.", "bad"
       exit doBoxOpen
    end if
-   put sxBase642Bin(textEncode(field "key:out", "ascii")) into tBox
+   put sxBase642Bin(textEncode(sBoxCt, "ascii")) into tBox
    try
       put "Bob reads: " & textDecode(sxBoxOpen(tBox, sApk, sBsk), "utf-8") into field "key:out"
       setStatus "key:status", "Bob opened it with his secret key and Alice's public key.", "ok"
@@ -480,11 +482,11 @@ on doBoxEve
    local tBox
    local tEpk
    local tEsk
-   if field "key:out" is empty then
+   if sBoxCt is empty then
       setStatus "key:status", "Encrypt a message first.", "bad"
       exit doBoxEve
    end if
-   put sxBase642Bin(textEncode(field "key:out", "ascii")) into tBox
+   put sxBase642Bin(textEncode(sBoxCt, "ascii")) into tBox
    sxBoxKeypair tEpk, tEsk
    try
       get sxBoxOpen(tBox, sApk, tEsk)
