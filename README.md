@@ -1,96 +1,116 @@
 # SodiumXT
 
-**SodiumXT** is a [libsodium](https://libsodium.org) binding for OpenXTalk (OXT) / the xTalk
-family. It brings modern cryptography (authenticated encryption, Argon2id password hashing, a
-streaming AEAD for large files, X25519 boxes, ed25519 signatures, BLAKE2b hashing, a real
-CSPRNG) to xTalk, behind a flat C ABI with an LCB layer on top, the same shape as its sibling
-extension TorrentXT.
+**Modern, authenticated cryptography for OpenXTalk and the xTalk family, made easy.**
 
-## Status: Phases 0-6 complete and verified on-engine
+SodiumXT is a [libsodium](https://libsodium.org) binding for OpenXTalk (OXT) / LiveCode. It
+gives xTalk apps the cryptography people actually need today, behind a small, friendly set of
+`sx*` handlers:
 
-The full libsodium surface from `docs/SodiumXT-IMPLEMENTATION-PLAN.md` is wrapped in the C
-shim and exercised by the test suite. The whole `sx*` API has been run on the OXT engine
-(Windows x64): `put sxSelfTest()` reports **35 / 35 PASSED**. See `docs/api-reference.md`
-for the per-handler reference.
+- **Authenticated encryption** with a passphrase or a key (secretbox, AEAD) - tampering and
+  wrong keys are *rejected*, never silently mis-decrypted.
+- **Password hashing** with Argon2id (memory-hard), for login checks and key derivation.
+- **Large files**: encrypt, decrypt, and hash files of any size, streamed so they never have
+  to fit in memory.
+- **Public-key** encryption and **sealed boxes** (X25519), and **digital signatures**
+  (ed25519).
+- **Hashing** (BLAKE2b), **hex/base64**, **key exchange**, and a real **cryptographic random**
+  generator.
 
-- **Phase 0** - the FFI buffer round trip (`sxVersion`, `sxRandomBytes`), the proof a `Data`
-  survives script -> Pointer -> C -> Pointer -> `Data` intact.
-- **Phase 1** - BLAKE2b hashing, hex/base64 encode-decode, constant-time compare.
-- **Phase 2** - secretbox + AEAD (prepend random nonce), Argon2id (`pwhash` / `pwhash_str`).
-- **Phase 3** - streaming AEAD (secretstream) with a handle table, and C-side
-  `sxEncryptFile` / `sxDecryptFile` (the bytes never enter a `Data`; truncation is detected).
-- **Phase 4** - X25519 boxes + sealed boxes, ed25519 sign / verify (random or seeded).
-- **Phase 5** - key derivation (`kdf`), key exchange (`kx`), and padding.
-- **Phase 6** - streaming / whole-file BLAKE2b (`sxHashFile`, plus multipart
-  `sxHashInit` / `sxHashUpdate` / `sxHashFinal`) and an unbiased `sxRandomUniform`.
+It wraps the audited libsodium library, so you can delete hand-rolled crypto and just call
+`sx*` instead.
 
-```
-src/sodium_shim.{c,h}   C shim, ABI sxt_* (99 symbols)  ->  sodiumxt.{so,dll,dylib}
-src/sodium.lcb          LCB binding, public sx* (54 handlers; verified on-engine, OXT self-test 35/35)
-tests/sodium_smoke_test.c   160 checks: KATs + round trips + tamper/truncation + the firewall
-CMakeLists.txt          acquires a pinned libsodium (1.0.20) and static-links it
-tools/                  check-livecodescript.py (static gate) + package-extension.py
-```
+## Why
 
-Verified in this environment: the C shim builds warning-clean (`-Werror`) and all **160**
-checks pass under **gcc ASan + UBSan**, with known-answer tests pinned against published /
-RFC vectors (BLAKE2b, Argon2id, ed25519) and tamper / wrong-key / truncation tests proving
-the authentication actually fails closed. The CMake build produces a `sodiumxt` shared library
-exporting **only** the `sxt_*` surface, and the static checker is green.
+The stock `encrypt ... using "aes-256-cbc" with password ...` path in xTalk has a weak key
+derivation and no integrity checking: a corrupted or tampered ciphertext decrypts to garbage
+instead of failing. SodiumXT fixes both. Argon2id makes passphrases expensive to guess, and
+every cipher carries an authentication tag, so a wrong key or a single flipped byte is
+detected and rejected.
 
-The **`.lcb` layer is verified on-engine**: it compiles and loads in OXT, and `sxSelfTest()`
-exercises every `sx*` handler (round trips, known-answer vectors, tamper / wrong-key checks)
-to **35 / 35 PASSED** on OXT Windows x64. The C ABI and the `.lcb` are platform-independent
-and the C suite plus the committed binaries are green on all five platforms via CI, so the
-other OXT platforms are expected to match; a 30-second `sxSelfTest()` on mac/Linux OXT would
-close them formally. The reconciliation history is in the banner at the top of `src/sodium.lcb`.
+## Requirements
 
-## What is here
+- OpenXTalk, or LiveCode 9.6.3+ (anything that loads LiveCode Builder extensions).
+- Desktop platforms: **Linux** (x86_64, x86), **macOS** (universal), **Windows** (64- and
+  32-bit). The matching native library ships bundled inside the extension; there is nothing to
+  install separately, and no `LD_LIBRARY_PATH` or `sudo` needed.
 
-- **`CLAUDE.md`** - the operational guidance and the hard-won-lesson list. Most of the FFI
-  and OXT/LCB lessons were paid for while building TorrentXT and are carried over so they are
-  not relearned. Read it.
-- **`docs/SodiumXT-IMPLEMENTATION-PLAN.md`** - the full spec: the engine decision, the C ABI
-  design, the capability surface, the phased plan, the test strategy, and the risk register.
-  Read it first.
-- **`docs/building.md`** - how to build, test under sanitizers, run the static gate, and
-  package the native library.
-- **`examples/sodium-tests.livecodescript`** - an xTalk self-test harness: `put sxSelfTest()`
-  runs every capability through round-trips, known-answer vectors, and tamper checks.
-- **`examples/sodium-demo.livecodescript`** - an interactive showcase stack that builds its own
-  UI on open. A hands-on panel does passphrase-based authenticated encryption (random salt ->
-  Argon2id -> secretbox) and hashing; a guided "capability tour" (one button per category, plus
-  Run Full Tour) narrates every part of the library into a log: BLAKE2b + hex/base64, Argon2id +
-  KDF, secretbox + AEAD, X25519 box + sealed box, ed25519 sign/verify, crypto_kx, secretstream,
-  and whole-file encryption.
+## Install
 
-## Build and test
+1. Get SodiumXT (download a release, or clone this repository).
+2. In the OpenXTalk / LiveCode IDE, install it through the **Extension Manager**, the same way
+   you install any LCB extension. The per-platform native library under `src/code/` is
+   resolved automatically by the engine.
+3. Verify it loaded from the message box:
 
-```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSODIUMXT_BUILD_TESTS=ON
-cmake --build build --config Release        # also writes src/code/<arch>-<platform>/sodiumxt.<ext>
-ctest --test-dir build --output-on-failure
-python3 tools/check-livecodescript.py
+   ```
+   put sxVersion()
+   -- e.g. SodiumXT 0.1.0 (libsodium 1.0.20)
+   ```
+
+Once installed, the `sx*` handlers are in scope in your stacks. See
+[docs/getting-started.md](docs/getting-started.md) for the few conventions worth knowing
+before your first call.
+
+## Quick start: encrypt a message with a passphrase
+
+```livecode
+local tSalt, tKey, tSealed, tPlain
+
+-- Encrypt. Keep tSalt next to the ciphertext so you can re-derive the key later.
+put sxRandomBytes(16) into tSalt
+put sxPwHash(textEncode("my passphrase", "utf-8"), tSalt, 32, "2", sxPwMemInteractive()) into tKey
+put sxSecretBox(textEncode("Attack at dawn.", "utf-8"), tKey) into tSealed
+
+-- Decrypt. Re-derive the same key from the stored salt, then open.
+put sxPwHash(textEncode("my passphrase", "utf-8"), tSalt, 32, "2", sxPwMemInteractive()) into tKey
+put textDecode(sxSecretBoxOpen(tSealed, tKey), "utf-8") into tPlain   -- "Attack at dawn."
 ```
 
-The build copies the library into `src/code/<arch>-<platform>/` itself, so the
-packaged extension can resolve `c:sodiumxt>` with no extra step. On Windows,
-link libsodium from vcpkg; see `docs/building.md` for the exact MSVC invocation,
-the sanitizer build, and packaging.
+If the passphrase is wrong or the ciphertext was tampered with, `sxSecretBoxOpen` throws
+instead of returning garbage - wrap it in `try ... catch`.
 
-## Native libraries (CI)
+## Documentation
 
-`.github/workflows/ci.yml` builds the native `sodiumxt` library for the whole platform matrix
-on every push - `x86_64-linux`, `x86-linux`, `universal-mac`, `x86_64-win32`, `x86-win32`
-(Windows links libsodium from vcpkg; the others build the pinned source) - runs the C smoke
-test on each, and uploads each platform's binary as an artifact, plus a combined
-`sodiumxt-all-platforms` bundle laid out as `src/code/<arch>-<platform>/`.
+- **[Getting started](docs/getting-started.md)** - install, load, the `Data` / `textEncode`
+  rules, and how errors are reported.
+- **[API reference](docs/api-reference.md)** - every `sx*` handler by category.
+- **[Recipes](docs/recipes.md)** - copy-paste solutions for common tasks (file encryption,
+  password storage, signing, public-key messaging, key exchange).
+- **[Security model](docs/security.md)** - what SodiumXT guarantees, and the handful of rules
+  to follow so you keep those guarantees.
 
-## Why it exists
+## Examples
 
-TorrentXT's optional encryption uses OXT's stock `encrypt ... using "aes-256-cbc" with
-password`. That has a weak key derivation (OpenSSL's old `EVP_BytesToKey`) and no
-cipher-level authentication. SodiumXT is the proper fix and a reusable building block: any
-xTalk app, TorrentXT included, can drop its hand-rolled crypto and call `sx*` instead.
+Two ready-to-run stacks are in [`examples/`](examples):
 
-House style: no em-dashes; comment the *why*, densely.
+- **`sodium-demo.livecodescript`** - an interactive, tabbed showcase: passphrase encryption
+  (with a live tamper-rejection demo), public-key messaging, signatures, hashing, and file
+  encryption, each with step-by-step guidance.
+- **`sodium-tests.livecodescript`** - a self-test: `put sxSelfTest()` runs every capability
+  through round-trips, known-answer vectors, and tamper / wrong-key checks and returns a
+  pass/fail report.
+
+## Security at a glance
+
+SodiumXT is designed so the easy way is the safe way:
+
+- Nonces are handled for you (a fresh random nonce is generated and prepended, or derived
+  per chunk). There is no error-prone "bring your own nonce" entry point.
+- Compare secrets with `sxMemEqual` (constant time), never with `is` or `=`.
+- Use `sxRandomBytes` / `sxRandomUniform` for anything that must be unguessable, never the
+  engine `random()`.
+- Store the salt (and the cost settings) alongside a passphrase-derived ciphertext so you can
+  re-derive and raise the cost later.
+
+The full model and the reasoning are in [docs/security.md](docs/security.md).
+
+## Contributing / building from source
+
+Most users never need to build anything - the extension ships with prebuilt native libraries
+for every platform. If you want to build from source, change the C shim, or contribute, see
+[CONTRIBUTING.md](CONTRIBUTING.md) and [`docs/development/`](docs/development).
+
+## License
+
+SodiumXT is released under the [MIT License](LICENSE). It statically links libsodium, which is
+distributed under the ISC license. See `LICENSE` for details.

@@ -1,10 +1,11 @@
 # SodiumXT API reference
 
-The public `sx*` surface of `src/sodium.lcb` (library `org.openxtalk.library.sodium`),
-as called from LiveCode Script. Verified on-engine: `put sxSelfTest()` reports 35 / 35.
+The complete `sx*` handler surface (library `org.openxtalk.library.sodium`), as called from
+LiveCode Script.
 
-For the design and the C ABI underneath, see `docs/SodiumXT-IMPLEMENTATION-PLAN.md`
-and `CLAUDE.md`. For build and packaging, see `docs/building.md`.
+New to SodiumXT? Start with [getting-started.md](getting-started.md) for setup and the calling
+conventions, then [recipes.md](recipes.md) for end-to-end examples and
+[security.md](security.md) for the rules that keep your data safe.
 
 ## Conventions you need before calling anything
 

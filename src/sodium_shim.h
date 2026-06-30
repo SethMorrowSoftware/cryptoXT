@@ -5,7 +5,7 @@
  * (src/sodium.lcb, public sx*) and libsodium. It adds NO crypto logic of its
  * own: it validates lengths and pointers at the boundary, calls libsodium, and
  * reports bytes-written or a defined error code. See CLAUDE.md ("FFI / C-ABI
- * conventions") and docs/SodiumXT-IMPLEMENTATION-PLAN.md (section 3) for the
+ * conventions") and docs/development/implementation-plan.md (section 3) for the
  * full rationale; the operative parts are restated here so a reader of the
  * header alone cannot misuse the contract.
  *

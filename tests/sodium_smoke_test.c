@@ -12,7 +12,7 @@
  * without the LiveCode engine. The plan's Phase 0 gate is exactly this round
  * trip working byte-for-byte under the sanitizers.
  *
- * Build under gcc ASan + UBSan while iterating (see CLAUDE.md / docs/building.md):
+ * Build under gcc ASan + UBSan while iterating (see CLAUDE.md / docs/development/building.md):
  * a buffer-sizing bug surfaces there, not in a passing round trip.
  */
 #include "sodium_shim.h"
