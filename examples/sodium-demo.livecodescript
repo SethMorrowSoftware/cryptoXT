@@ -88,7 +88,7 @@ private command makeLabel pName, pRect, pText, pColorName, pSize, pStyle
    set the lockText of field pName to true
    set the showBorder of field pName to false
    set the opaque of field pName to false
-   set the margins of field pName to 0
+   set the margins of field pName to 4
    set the textFont of field pName to "Helvetica"
    set the textSize of field pName to pSize
    set the textStyle of field pName to pStyle
@@ -177,7 +177,7 @@ on buildUI
       exit buildUI
    end if
    set the width of this stack to 820
-   set the height of this stack to 600
+   set the height of this stack to 648
    set the name of this stack to "SodiumXT Demo"
    set the backgroundColor of this stack to clr("appBg")
 
@@ -201,8 +201,8 @@ on buildUI
    makeButton "ui:tabAbout", "644,76,793,104", "About", false
 
    -- Content panel + footer.
-   makeRect "ui:panel", "24,114,796,556", "panelBg", 10
-   makeLabel "ui:footer", "24,564,796,586", "All operations run against the real libsodium through the SodiumXT C shim. Authenticated: tampering and wrong keys are rejected, never silently mis-decrypted.", "muted", 11, "plain"
+   makeRect "ui:panel", "24,112,796,604", "panelBg", 10
+   makeLabel "ui:footer", "24,612,796,638", "Backed by libsodium through the SodiumXT C shim. Every cipher here is authenticated: tampering and wrong keys are rejected.", "muted", 11, "plain"
 
    buildEncTab
    buildKeyTab
@@ -212,66 +212,67 @@ on buildUI
 end buildUI
 
 on buildEncTab
-   makeLabel "enc:h", "48,130,748,156", "Passphrase-based authenticated encryption", "ink", 16, "bold"
-   makeLabel "enc:exp", "48,158,748,202", "A random salt and Argon2id turn your passphrase into a 256-bit key; secretbox seals the message with a Poly1305 tag. A wrong passphrase or a single flipped byte is rejected, not mis-decrypted.", "muted", 12, "plain"
-   makeLabel "enc:lp", "48,212,300,230", "Passphrase", "ink", 12, "bold"
-   makeInput "enc:pass", "48,232,430,258", "correct horse battery staple"
-   makeLabel "enc:lm", "48,266,300,284", "Message", "ink", 12, "bold"
-   makeInput "enc:msg", "48,286,748,344", "Meet at the docks at midnight."
-   makeButton "enc:encrypt", "48,356,210,386", "Encrypt", true
-   makeButton "enc:decrypt", "220,356,360,386", "Decrypt", false
-   makeButton "enc:tamper", "590,356,748,386", "Flip a byte", false
-   makeLabel "enc:lo", "48,394,748,412", "Sealed output (base64 of salt + nonce + ciphertext + MAC)", "muted", 11, "plain"
-   makeMono "enc:out", "48,414,748,500"
-   makeLabel "enc:status", "48,508,748,540", "Type a passphrase and a message, then Encrypt.", "muted", 12, "plain"
+   makeLabel "enc:h", "48,126,748,154", "Passphrase-based authenticated encryption", "ink", 16, "bold"
+   makeLabel "enc:exp", "48,158,748,224", "Step 1: type a passphrase and a message. Step 2: Encrypt seals it (a random salt + Argon2id derive the key; secretbox adds a Poly1305 tag). Step 3: Decrypt to recover it, or Flip a byte then Decrypt to watch the tag reject the tampered ciphertext.", "muted", 12, "plain"
+   makeLabel "enc:lp", "48,234,300,256", "Passphrase", "ink", 12, "bold"
+   makeInput "enc:pass", "48,258,430,286", "correct horse battery staple"
+   makeLabel "enc:lm", "48,294,300,316", "Message", "ink", 12, "bold"
+   makeInput "enc:msg", "48,318,748,372", "Meet at the docks at midnight."
+   makeButton "enc:encrypt", "48,386,210,418", "1. Encrypt", true
+   makeButton "enc:decrypt", "220,386,360,418", "2. Decrypt", false
+   makeButton "enc:tamper", "560,386,748,418", "Flip a byte", false
+   makeLabel "enc:lo", "48,426,748,446", "Sealed output (base64 of salt + nonce + ciphertext + MAC)", "muted", 11, "plain"
+   makeMono "enc:out", "48,448,748,540"
+   makeLabel "enc:status", "48,556,748,596", "Type a passphrase and a message, then click 1. Encrypt.", "muted", 12, "plain"
 end buildEncTab
 
 on buildKeyTab
-   makeLabel "key:h", "48,130,748,156", "Public-key encryption (X25519)", "ink", 16, "bold"
-   makeLabel "key:exp", "48,158,748,202", "Alice and Bob each hold a keypair. Alice encrypts to Bob's PUBLIC key; only Bob's SECRET key opens it. A third party with the wrong key is rejected. A sealed box even hides who the sender was.", "muted", 12, "plain"
-   makeButton "key:gen", "48,210,300,240", "Generate keypairs", true
-   makeMono "key:keys", "312,210,748,300"
-   makeLabel "key:lm", "48,312,300,330", "Message from Alice to Bob", "ink", 12, "bold"
-   makeInput "key:msg", "48,332,748,372", "For your eyes only, Bob."
-   makeButton "key:box", "48,384,210,414", "Encrypt to Bob", true
-   makeButton "key:open", "220,384,360,414", "Bob opens", false
-   makeButton "key:eve", "560,384,748,414", "Eavesdropper tries", false
-   makeMono "key:out", "48,424,748,496"
-   makeLabel "key:status", "48,506,748,540", "Generate keypairs to begin.", "muted", 12, "plain"
+   makeLabel "key:h", "48,126,748,154", "Public-key encryption (X25519)", "ink", 16, "bold"
+   makeLabel "key:exp", "48,158,748,224", "Alice and Bob each hold a keypair. Alice encrypts to Bob's PUBLIC key; only Bob's SECRET key can open it, and a sealed box even hides who sent it. Work left to right: 1. Generate the keypairs, 2. Encrypt to Bob, 3. Bob opens. Then try the Eavesdropper.", "muted", 12, "plain"
+   makeButton "key:gen", "48,234,330,266", "1. Generate keypairs", true
+   makeMono "key:keys", "342,234,748,320"
+   makeLabel "key:lm", "48,328,400,348", "Message from Alice to Bob", "ink", 12, "bold"
+   makeInput "key:msg", "48,350,748,388", "For your eyes only, Bob."
+   makeButton "key:box", "48,400,230,432", "2. Encrypt to Bob", true
+   makeButton "key:open", "240,400,380,432", "3. Bob opens", false
+   makeButton "key:eve", "560,400,748,432", "Eavesdropper tries", false
+   makeMono "key:out", "48,442,748,540"
+   makeLabel "key:status", "48,556,748,596", "Click 1. Generate keypairs to begin.", "muted", 12, "plain"
 end buildKeyTab
 
 on buildSignTab
-   makeLabel "sign:h", "48,130,748,156", "Digital signatures (ed25519)", "ink", 16, "bold"
-   makeLabel "sign:exp", "48,158,748,202", "Sign a statement with a SECRET key; anyone with the matching PUBLIC key can verify it. Change one character of the statement and the signature no longer verifies.", "muted", 12, "plain"
-   makeButton "sign:gen", "48,210,300,240", "Generate signing keypair", true
-   makeMono "sign:keys", "312,210,748,270"
-   makeLabel "sign:lm", "48,282,400,300", "Statement to sign", "ink", 12, "bold"
-   makeInput "sign:msg", "48,302,748,342", "I, Alice, authorize the release of version 1.0."
-   makeButton "sign:sign", "48,354,210,384", "Sign", true
-   makeButton "sign:verify", "220,354,360,384", "Verify", false
-   makeLabel "sign:lo", "48,392,748,410", "Signature (64 bytes, hex)", "muted", 11, "plain"
-   makeMono "sign:out", "48,412,748,498"
-   makeLabel "sign:status", "48,506,748,540", "Generate a keypair, then Sign. Edit the statement and Verify to see it fail.", "muted", 12, "plain"
+   makeLabel "sign:h", "48,126,748,154", "Digital signatures (ed25519)", "ink", 16, "bold"
+   makeLabel "sign:exp", "48,158,748,224", "Sign a statement with a SECRET key; anyone with the matching PUBLIC key can verify it. Steps: 1. Generate a keypair, 2. Sign the statement, 3. Verify. Then edit one character of the statement and Verify again - the signature no longer matches.", "muted", 12, "plain"
+   makeButton "sign:gen", "48,234,330,266", "1. Generate keypair", true
+   makeMono "sign:keys", "342,234,748,300"
+   makeLabel "sign:lm", "48,308,400,328", "Statement to sign", "ink", 12, "bold"
+   makeInput "sign:msg", "48,330,748,370", "I, Alice, authorize the release of version 1.0."
+   makeButton "sign:sign", "48,382,210,414", "2. Sign", true
+   makeButton "sign:verify", "220,382,360,414", "3. Verify", false
+   makeLabel "sign:lo", "48,422,748,442", "Signature (64 bytes, hex)", "muted", 11, "plain"
+   makeMono "sign:out", "48,444,748,540"
+   makeLabel "sign:status", "48,556,748,596", "Click 1. Generate keypair, then Sign. Edit the statement and Verify to see it fail.", "muted", 12, "plain"
 end buildSignTab
 
 on buildHashTab
-   makeLabel "hash:h", "48,130,748,156", "Hashing and whole-file encryption", "ink", 16, "bold"
-   makeLabel "hash:exp", "48,158,748,202", "BLAKE2b is a fast cryptographic fingerprint. Files are hashed and encrypted chunk-by-chunk in C, so the bytes never load into memory and size is no object.", "muted", 12, "plain"
-   makeLabel "hash:lm", "48,212,400,230", "Text to hash", "ink", 12, "bold"
-   makeInput "hash:msg", "48,232,748,272", "The quick brown fox jumps over the lazy dog"
-   makeButton "hash:hash", "48,284,260,314", "Hash text (BLAKE2b-256)", true
-   makeMono "hash:out", "48,324,748,396"
-   makeButton "hash:hashfile", "48,410,260,440", "Hash a file...", false
-   makeButton "hash:encfile", "272,410,484,440", "Encrypt a file...", false
-   makeLabel "hash:status", "48,452,748,540", "Hash text, or pick a file to hash or encrypt.", "muted", 12, "plain"
+   makeLabel "hash:h", "48,126,748,154", "Hashing and whole-file encryption", "ink", 16, "bold"
+   makeLabel "hash:exp", "48,158,748,224", "BLAKE2b is a fast cryptographic fingerprint. Type text and Hash it - then change one character and hash again to see a completely different digest. Or pick a file to hash or encrypt: files are processed chunk-by-chunk in C, so size is no object.", "muted", 12, "plain"
+   makeLabel "hash:lm", "48,234,400,256", "Text to hash", "ink", 12, "bold"
+   makeInput "hash:msg", "48,258,748,298", "The quick brown fox jumps over the lazy dog"
+   makeButton "hash:hash", "48,310,280,342", "Hash text (BLAKE2b-256)", true
+   makeMono "hash:out", "48,352,748,468"
+   makeButton "hash:hashfile", "48,480,260,512", "Hash a file...", false
+   makeButton "hash:encfile", "272,480,484,512", "Encrypt a file...", false
+   makeLabel "hash:status", "48,556,748,596", "Hash the text above, or pick a file to hash or encrypt.", "muted", 12, "plain"
 end buildHashTab
 
 on buildAboutTab
-   makeLabel "about:h", "48,130,748,156", "SodiumXT", "ink", 16, "bold"
-   makeLabel "about:exp", "48,158,748,300", "SodiumXT brings modern, audited cryptography to OpenXTalk and the xTalk family through one library: authenticated encryption (secretbox and AEAD), Argon2id password hashing, a streaming cipher for large files, X25519 public-key boxes and sealed boxes, ed25519 signatures, BLAKE2b hashing, key derivation and key exchange, and a real CSPRNG. It wraps libsodium behind a flat C ABI with a thin LiveCode Builder layer, so any xTalk app can drop its hand-rolled crypto and just call sx*. Every cipher here authenticates: tampering and wrong keys fail closed.", "muted", 13, "plain"
-   makeButton "about:selftest", "48,320,300,350", "Run the full self-test", true
-   makeMono "about:out", "48,362,748,498"
-   makeLabel "about:status", "48,506,748,540", "Click to run a built-in self-test against the live library.", "muted", 12, "plain"
+   makeLabel "about:h", "48,126,748,154", "SodiumXT", "ink", 16, "bold"
+   makeLabel "about:exp", "48,158,748,300", "SodiumXT brings modern, audited cryptography to OpenXTalk and the xTalk family through one library: authenticated encryption (secretbox and AEAD), Argon2id password hashing, a streaming cipher for large files, X25519 public-key boxes and sealed boxes, ed25519 signatures, BLAKE2b hashing, key derivation and key exchange, and a real CSPRNG. It wraps libsodium behind a flat C ABI with a thin LiveCode Builder layer, so any xTalk app can drop its hand-rolled crypto and just call sx*. Every cipher here authenticates: tampering and wrong keys fail closed.", "muted", 12, "plain"
+   makeLabel "about:hint", "48,306,748,348", "New here? Open the Secret Key tab, type a passphrase, click Encrypt, then click Flip a byte and Decrypt - watch the tampering get rejected. That rejection is the whole point.", "accent", 12, "bold"
+   makeButton "about:selftest", "48,356,300,388", "Run the full self-test", true
+   makeMono "about:out", "48,398,748,540"
+   makeLabel "about:status", "48,556,748,596", "Click Run the full self-test to check every primitive against the live library.", "muted", 12, "plain"
 end buildAboutTab
 
 -- ==========================================================================
