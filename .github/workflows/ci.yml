@@ -23,6 +23,36 @@ jobs:
           python-version: "3.x"
       - run: python tools/check-livecodescript.py
 
+  # Integrity gate for the committed native blobs: every src/code/<id>/sodiumxt.*
+  # must be listed in src/code/MANIFEST.sha256 and match its recorded SHA256. This
+  # catches a committed binary that was swapped or corrupted without the manifest
+  # being regenerated (tools/package-extension.py, and the commit-binaries job on
+  # main, keep the manifest in step). It does NOT prove a blob matches its source
+  # - that comes from the native/commit-binaries jobs rebuilding every platform
+  # from the pinned libsodium - so this is the tamper/drift check that pairs with
+  # that rebuild.
+  verify-binaries:
+    name: committed binaries match MANIFEST.sha256
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every committed blob is listed, and every listed blob matches
+        run: |
+          cd src/code
+          test -f MANIFEST.sha256 || { echo "src/code/MANIFEST.sha256 is missing"; exit 1; }
+          # Fail if a sodiumxt.* blob exists that the manifest does not list.
+          missing=0
+          while IFS= read -r blob; do
+            rel="${blob#./}"
+            if ! grep -q -F "  $rel" MANIFEST.sha256; then
+              echo "committed blob not listed in MANIFEST.sha256: $rel"
+              missing=1
+            fi
+          done < <(find . -type f \( -name 'sodiumxt.so' -o -name 'sodiumxt.dll' -o -name 'sodiumxt.dylib' \))
+          [ "$missing" -eq 0 ] || exit 1
+          # Every listed blob exists and matches its recorded hash.
+          sha256sum -c MANIFEST.sha256
+
   sanitizers:
     name: ASan + UBSan (gcc)
     runs-on: ubuntu-latest
@@ -168,6 +198,9 @@ jobs:
         with:
           path: staged
           pattern: sodiumxt-*
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
       - name: Lay binaries into src/code/<arch>-<platform>/
         run: |
           for d in staged/sodiumxt-*; do
@@ -178,6 +211,8 @@ jobs:
           done
           echo "Native libraries staged into src/code:"
           find src/code -type f | sort
+      - name: Regenerate the binary provenance manifest
+        run: python tools/package-extension.py --manifest-only
       - name: Commit refreshed binaries (loop-guarded with [skip ci])
         run: |
           git config user.name  "github-actions[bot]"

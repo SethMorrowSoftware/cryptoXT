@@ -22,6 +22,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import os
 import platform
 import shutil
@@ -29,6 +30,17 @@ import sys
 
 
 PLATFORM_SUFFIX = {"linux": ".so", "win32": ".dll", "mac": ".dylib"}
+
+# The provenance manifest that records the SHA256 of every committed native blob
+# under src/code/. It lets a consumer (and the CI verify-binaries job) confirm a
+# committed binary was not silently swapped or corrupted relative to what the
+# packaging step recorded. It does NOT by itself prove a blob matches the source
+# it was built from - that guarantee comes from CI rebuilding every platform from
+# the pinned libsodium on merge to main - so treat the CI-produced binaries as
+# authoritative and this file as their integrity record. Format is plain
+# `sha256sum` (hash, two spaces, path relative to src/code), so it verifies with
+# `cd src/code && sha256sum -c MANIFEST.sha256`.
+MANIFEST_NAME = "MANIFEST.sha256"
 
 
 def detect_os():
@@ -85,6 +97,40 @@ def find_built_library(build_dir, suffix):
         f"Build first: cmake -S . -B {build_dir} && cmake --build {build_dir}")
 
 
+def sha256_of(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write_manifest(repo_root):
+    """Rewrite src/code/MANIFEST.sha256 over every committed native blob present.
+
+    Scans src/code/<id>/sodiumxt.{so,dll,dylib}, records each blob's SHA256, and
+    writes them sorted for a stable diff. Called after a copy so the manifest
+    stays in step with whatever binaries are in the tree; CI's commit-binaries
+    job runs the same regeneration after laying down all platforms."""
+    code_dir = os.path.join(repo_root, "src", "code")
+    entries = []
+    for platform_id in sorted(os.listdir(code_dir)):
+        blob_dir = os.path.join(code_dir, platform_id)
+        if not os.path.isdir(blob_dir):
+            continue
+        for suffix in PLATFORM_SUFFIX.values():
+            blob = os.path.join(blob_dir, f"sodiumxt{suffix}")
+            if os.path.isfile(blob):
+                rel = os.path.join(platform_id, f"sodiumxt{suffix}")
+                entries.append((rel, sha256_of(blob)))
+    manifest = os.path.join(code_dir, MANIFEST_NAME)
+    with open(manifest, "w", encoding="utf-8", newline="\n") as handle:
+        for rel, digest in sorted(entries):
+            handle.write(f"{digest}  {rel}\n")
+    print(f"package-extension: wrote {manifest} ({len(entries)} blob(s))")
+    return manifest
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -94,7 +140,16 @@ def main(argv):
                         help="override the detected <arch>-<platform> id")
     parser.add_argument("--repo-root", default=".",
                         help="repository root (where src/code/ lives)")
+    parser.add_argument("--manifest-only", action="store_true",
+                        help="just regenerate src/code/MANIFEST.sha256 over the "
+                             "committed blobs and exit (no build needed); used by "
+                             "the commit-binaries CI job after laying down all "
+                             "platforms")
     args = parser.parse_args(argv[1:])
+
+    if args.manifest_only:
+        write_manifest(args.repo_root)
+        return 0
 
     platform_id = args.platform_id or default_platform_id()
     os_token = os_from_platform_id(platform_id)
@@ -110,8 +165,9 @@ def main(argv):
 
     size = os.path.getsize(dest)
     print(f"package-extension: {src} -> {dest} ({size} bytes, id {platform_id})")
-    print("Remember to `git add` the refreshed binary in the SAME change as the "
-          "native edit (CLAUDE.md workflow rule).")
+    write_manifest(args.repo_root)
+    print("Remember to `git add` the refreshed binary AND MANIFEST.sha256 in the "
+          "SAME change as the native edit (CLAUDE.md workflow rule).")
     return 0
 
 

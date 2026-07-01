@@ -95,12 +95,22 @@ on testEncoding
    local tBin
    local tHex
    local tRound
+   local tTriplet
+   local tEmpty
    sxSection "encoding"
    put sxHex2Bin(textEncode("deadbeef", "ascii")) into tBin
    put sxHexOf(tBin) into tHex
    sxCheck (tHex is "deadbeef"), "hex round trip (deadbeef)"
    put sxBase642Bin(sxBin2Base64(sxUtf8("Hello, xTalk!"))) into tRound
    sxCheck (textDecode(tRound, "utf-8") is "Hello, xTalk!"), "base64 round trip"
+   -- Regression (short payloads): a 3-byte value encodes to a 4-char base64
+   -- group, the smallest whole group and the exact size the decode out buffer
+   -- must fit. This round trip used to throw (the wrapper allocated one byte too
+   -- few), so keep a 3-byte and an empty case pinned here on-engine.
+   put sxBase642Bin(sxBin2Base64(textEncode("abc", "ascii"))) into tTriplet
+   sxCheck (textDecode(tTriplet, "ascii") is "abc"), "base64 round trip of a 3-byte value"
+   put sxBase642Bin(sxBin2Base64(textEncode("", "ascii"))) into tEmpty
+   sxCheck (the number of bytes in tEmpty is 0), "base64 round trip of an empty value"
 end testEncoding
 
 on testHashing

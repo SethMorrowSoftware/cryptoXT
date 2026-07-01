@@ -471,9 +471,17 @@ public handler sxBase642Bin(in pB64 as Data) returns Data
    unsafe
       put _sxt_base64_variant_urlsafe_no_padding() into tVariant
    end unsafe
-   put sAlloc(tInLen + 1) into tOut
+   -- The shim demands cap >= (b64len / 4) * 3 + 3 (its own conservative upper
+   -- bound on the decoded size, NUL-free) and returns -needed if the buffer is
+   -- short. Since (b64len / 4) * 3 <= b64len, tInLen + 4 is always at least that
+   -- needed AND at least the actual decoded byte count, so a valid small input
+   -- (a 4-char group decoding to 3 bytes, or the empty string) never trips the
+   -- -needed path. tInLen + 1 did: a 4-char group needs 6 but was given 5, so a
+   -- plain base64 round trip of any 3-byte value threw. No division here (LCB
+   -- `/` is real division); the flat +4 slack is provably sufficient.
+   put sAlloc(tInLen + 4) into tOut
    unsafe
-      put _sxt_base642bin(tOut, tInLen + 1, tInPtr, tInLen, tVariant) into tWritten
+      put _sxt_base642bin(tOut, tInLen + 4, tInPtr, tInLen, tVariant) into tWritten
    end unsafe
    return sFinish("sxBase642Bin", tOut, tWritten)
 end handler

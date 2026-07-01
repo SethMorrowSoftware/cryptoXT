@@ -350,6 +350,13 @@ SXT_API int SXT_CALL sxt_bin2base64(char *out, int cap,
         set_error("sxt_bin2base64: unknown base64 variant");
         return SXT_ERR_BADARG;
     }
+    /* base64 expands by ~4/3 plus a NUL; bound the input so the encoded length
+     * stays below SXT_MAX_BUFFER (and so the (int) cast below cannot overflow),
+     * the same firewall sxt_bin2hex applies to its 2x expansion. */
+    if (inlen >= SXT_MAX_BUFFER / 2) {
+        set_error("sxt_bin2base64: input too large for a single buffer");
+        return SXT_ERR_BADARG;
+    }
     /* sodium_base64_encoded_len already includes room for the NUL. */
     needed = (int)sodium_base64_encoded_len((size_t)inlen, variant);
     if (cap < needed) {
@@ -503,6 +510,12 @@ SXT_API int SXT_CALL sxt_secretbox_open(unsigned char *out, int cap,
         set_error("sxt_secretbox_open: ciphertext too short");
         return SXT_ERR_BADARG;
     }
+    /* Keep the size query (-plainlen) strictly inside the -needed band so it can
+     * never alias a hard-error code, exactly as the encrypt side bounds msglen. */
+    if (boxlen >= SXT_MAX_BUFFER) {
+        set_error("sxt_secretbox_open: ciphertext too large for a single buffer");
+        return SXT_ERR_BADARG;
+    }
     plainlen = boxlen - noncebytes - macbytes;
     if (cap < plainlen) {
         return -plainlen;
@@ -609,6 +622,10 @@ SXT_API int SXT_CALL sxt_aead_decrypt(unsigned char *out, int cap,
     }
     if (boxlen < npub + abytes) {
         set_error("sxt_aead_decrypt: ciphertext too short");
+        return SXT_ERR_BADARG;
+    }
+    if (boxlen >= SXT_MAX_BUFFER) {   /* keep -plainlen inside the -needed band */
+        set_error("sxt_aead_decrypt: ciphertext too large for a single buffer");
         return SXT_ERR_BADARG;
     }
     plainlen = boxlen - npub - abytes;
@@ -1070,6 +1087,10 @@ SXT_API int SXT_CALL sxt_secretstream_pull(int handle, unsigned char *out, int c
         set_error("sxt_secretstream_pull: chunk too short");
         return SXT_ERR_BADARG;
     }
+    if (inlen >= SXT_MAX_BUFFER) {   /* keep -plainlen inside the -needed band */
+        set_error("sxt_secretstream_pull: chunk too large for a single buffer");
+        return SXT_ERR_BADARG;
+    }
     plainlen = inlen - ab;
     if (cap < plainlen) {
         return -plainlen;
@@ -1394,6 +1415,10 @@ SXT_API int SXT_CALL sxt_box_open(unsigned char *out, int cap,
         set_error("sxt_box_open: ciphertext too short");
         return SXT_ERR_BADARG;
     }
+    if (boxlen >= SXT_MAX_BUFFER) {   /* keep -plainlen inside the -needed band */
+        set_error("sxt_box_open: ciphertext too large for a single buffer");
+        return SXT_ERR_BADARG;
+    }
     plainlen = boxlen - noncebytes - macbytes;
     if (cap < plainlen) {
         return -plainlen;
@@ -1475,6 +1500,10 @@ SXT_API int SXT_CALL sxt_box_seal_open(unsigned char *out, int cap,
     }
     if (sealedlen < sealbytes) {
         set_error("sxt_box_seal_open: sealed box too short");
+        return SXT_ERR_BADARG;
+    }
+    if (sealedlen >= SXT_MAX_BUFFER) {   /* keep -plainlen inside the -needed band */
+        set_error("sxt_box_seal_open: sealed box too large for a single buffer");
         return SXT_ERR_BADARG;
     }
     plainlen = sealedlen - sealbytes;
@@ -1663,6 +1692,10 @@ SXT_API int SXT_CALL sxt_sign_open(unsigned char *out, int cap,
     }
     if (signedlen < sigbytes) {
         set_error("sxt_sign_open: signed message too short");
+        return SXT_ERR_BADARG;
+    }
+    if (signedlen >= SXT_MAX_BUFFER) {   /* keep -maxmsg inside the -needed band */
+        set_error("sxt_sign_open: signed message too large for a single buffer");
         return SXT_ERR_BADARG;
     }
     maxmsg = signedlen - sigbytes;

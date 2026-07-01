@@ -85,8 +85,16 @@ to work around with hand-rolled crypto next to SodiumXT.
 
 ## Provenance and reporting
 
-SodiumXT statically links a pinned, integrity-checked release of libsodium, so the cryptography
-you run is the upstream audited code, unmodified. If you believe you have found a security issue
-in SodiumXT's binding layer, report it privately to the maintainer rather than opening a public
-issue. Vulnerabilities in libsodium itself should go to the
-[libsodium project](https://github.com/jedisct1/libsodium).
+SodiumXT statically links a pinned release of libsodium, so the cryptography you run is the
+upstream audited code, unmodified. On the Linux and macOS builds that release is fetched by exact
+version and verified against a pinned SHA256 before it is compiled. The Windows build links the
+libsodium that vcpkg provides, which is held to the same libsodium 1.0.x line rather than the
+SHA256 pin; every platform must then pass the same known-answer tests (BLAKE2b, Argon2id, ed25519,
+KDF) before its binary ships, which is the functional guard against any drift. The committed native
+binaries under `src/code/` carry a `MANIFEST.sha256` and are rebuilt from the pinned source and
+re-verified by CI; for the strongest assurance you can build from source yourself (see
+`docs/development/building.md`).
+
+If you believe you have found a security issue in SodiumXT's binding layer, report it privately to
+the maintainer rather than opening a public issue. Vulnerabilities in libsodium itself should go to
+the [libsodium project](https://github.com/jedisct1/libsodium).

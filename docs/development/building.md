@@ -156,6 +156,28 @@ Platform ids are architecture-first, and Windows is `-win32` for both bitnesses:
 builds and tests the full matrix; the build (and the script) handle the one
 platform you are on.
 
+`package-extension.py` also refreshes `src/code/MANIFEST.sha256`, a plain
+`sha256sum` list of every committed native blob. The CI `verify-binaries` job
+recomputes those hashes on every push and pull request and fails if a committed
+`sodiumxt.*` is unlisted or does not match, so a binary cannot be swapped or
+corrupted without the manifest being updated in the same change. Verify locally
+with `cd src/code && sha256sum -c MANIFEST.sha256`. The manifest is an integrity
+record, not a source-provenance proof: the binaries that ship are the ones CI
+rebuilds from the pinned libsodium (the `commit-binaries` job on `main`
+regenerates both the blobs and the manifest), so treat those as authoritative and
+build from source when you need end-to-end assurance.
+
+## A note on the pinned libsodium
+
+The Linux and macOS builds fetch libsodium by exact version and check it against
+the `SODIUMXT_LIBSODIUM_SHA256` pin in `CMakeLists.txt` before building. The
+Windows build links the libsodium supplied by vcpkg, which follows the same
+libsodium 1.0.x line but is not covered by that SHA256 pin; the known-answer
+tests (BLAKE2b, Argon2id, ed25519, KDF) run on every platform and are the guard
+against a constant or behaviour drift there. If you need the Windows binary held
+to an exact libsodium, pin the vcpkg baseline (a `vcpkg.json` manifest with a
+`builtin-baseline`) or build the pinned source on Windows too.
+
 ## What "done" means
 
 - A `.lcb` change is done once `tools/check-livecodescript.py` passes.
@@ -163,5 +185,6 @@ platform you are on.
   (for an ABI change) `SXT_ABI_VERSION` and the `.lcb` `kSXTABIVersion` are
   bumped together.
 - A native-library change is done once `tools/package-extension.py` has
-  refreshed the committed `src/code/<arch>-<platform>/` binary in the same
-  change.
+  refreshed the committed `src/code/<arch>-<platform>/` binary AND the
+  `src/code/MANIFEST.sha256` entry in the same change (the script does both;
+  `verify-binaries` in CI enforces the manifest).
