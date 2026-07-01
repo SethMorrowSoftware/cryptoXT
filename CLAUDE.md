@@ -25,7 +25,7 @@ layer), with a thin LCB layer on top:
 libsodium (ISC) - portable, audited, NaCl lineage; pure compute, no threads, no I/O of its own
    |- C shim     src/sodium_shim.c   ->  sodiumxt.{so,dll,dylib}  (ABI symbols: sxt_*)
         |- LCB binding  src/sodium.lcb        (library org.openxtalk.library.sodium; public sx*)
-             |- script helpers  examples/sodium-helpers.livecodescript
+             |- examples        examples/{sodium-demo, sodium-tests}.livecodescript
 ```
 
 The native library ships **bundled inside the extension** under

@@ -5,6 +5,13 @@ Read this before writing code. The operational as-built record and the hard-won-
 live in `CLAUDE.md`; this document is the design, the phased plan, the test strategy, and the
 risk register.
 
+> **Status (as-built):** every phase below (0 through 6) has shipped and is on-engine verified.
+> This document is the original design, kept as the historical spec and rationale; for the
+> current, authoritative state of the code use `CLAUDE.md` (the as-built record),
+> `docs/api-reference.md` (every shipped `sx*` handler), and `docs/development/building.md`.
+> Forward-looking wording ("future", "next up", the "open decisions" section) is preserved as it
+> was written at planning time and does not imply anything is still outstanding.
+
 House style note: no em-dashes (hyphens, commas, colons, parentheses instead).
 
 ---
@@ -66,7 +73,7 @@ Three layers, same shape as TorrentXT:
 libsodium (static)                      pure compute: no threads, no sockets, no files of its own
    |- C shim     src/sodium_shim.c   ->  sodiumxt.{so,dll,dylib}   (ABI: sxt_*)
         |- LCB binding  src/sodium.lcb       (library org.openxtalk.library.sodium; public sx*)
-             |- script helpers  examples/sodium-helpers.livecodescript
+             |- examples        examples/{sodium-demo, sodium-tests}.livecodescript
 ```
 
 - The shim is a **marshaling layer**: validate lengths and pointers, call libsodium, return
