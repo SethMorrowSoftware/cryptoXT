@@ -1,0 +1,65 @@
+name: CI
+
+# Starter CI for the Riptide repo. Riptide is a script-first layer (LCB + livecodescript)
+# over the SodiumXT and TorrentXT extensions, so there is no native build matrix here:
+# the native matrix lives in the sibling repos. Add one to this file only if Riptide ever
+# ships its own C shim (mirror SodiumXT's matrix + sanitizers if so).
+#
+# What runs: the LCB/livecodescript static gate, the conformance-vector known-answer test
+# (self-contained against libsodium), and a docs house-style check.
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  static-gate:
+    name: LCB static gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: python3 tools/check-livecodescript.py
+
+  conformance-vectors:
+    name: conformance vectors (libsodium KAT)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libsodium
+        run: sudo apt-get update && sudo apt-get install -y libsodium-dev
+      - name: Build and run the vectors
+        run: |
+          cc -O2 -Wall -Wextra tests/vectors/vectors.c -lsodium -o /tmp/riptide-vectors
+          /tmp/riptide-vectors
+
+  docs-style:
+    name: docs house style (ASCII, no em-dashes)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: No em-dashes, en-dashes, or smart quotes in Markdown
+        run: |
+          python3 - << 'PY'
+          import glob, sys
+          banned = {0x2013:'en-dash', 0x2014:'em-dash', 0x2018:'lsquo',
+                    0x2019:'rsquo', 0x201c:'ldquo', 0x201d:'rdquo'}
+          hits = []
+          for f in glob.glob('**/*.md', recursive=True):
+              for n, line in enumerate(open(f, encoding='utf-8'), 1):
+                  for code, name in banned.items():
+                      if chr(code) in line:
+                          hits.append(f"{f}:{n}: {name}")
+          if hits:
+              print("House-style violations (use hyphens, commas, colons, parentheses):")
+              print("\n".join(hits))
+              sys.exit(1)
+          print("docs house style OK")
+          PY
