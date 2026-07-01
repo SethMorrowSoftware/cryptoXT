@@ -134,6 +134,7 @@ deterministic unload hook.
 | `sxSecretStreamInitPull(pKey, pHeader)` | `Integer` | Open a decrypt stream from the header; returns a handle. |
 | `sxSecretStreamPull(pHandle, pCipherChunk, pAd, out rTag)` | `Data` | Decrypt one chunk; fills `rTag`. Throws on wrong key / tamper. |
 | `sxIsFinalTag(pTag)` | `Boolean` | True if `rTag` is the FINAL tag (the stream ended cleanly). |
+| `sxSecretStreamRekey(pHandle)` | command | Force a rekey of an open stream for in-session forward secrecy. Both the push and the pull side must call it at the same point in the stream (a one-sided rekey desyncs). |
 | `sxFreeStream(pHandle)` | command | Release a stream handle (idempotent). |
 | `sxEncryptFile(pSrcPath, pDstPath, pKey)` | command | Encrypt a file entirely C-side (bytes never enter a `Data`). Throws on I/O error. |
 | `sxDecryptFile(pSrcPath, pDstPath, pKey)` | command | Decrypt; throws on a wrong key or a truncated/corrupt input. |

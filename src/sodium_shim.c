@@ -1129,6 +1129,21 @@ SXT_API int SXT_CALL sxt_secretstream_last_tag(int handle)
     return slot->last_tag;
 }
 
+SXT_API int SXT_CALL sxt_secretstream_rekey(int handle)
+{
+    sxt_stream_slot *slot;
+    clear_error();
+    /* Works on either direction: both push and pull rekey their own state at the
+     * matching point in the stream. want_mode 0 accepts a push or a pull slot. */
+    slot = stream_lookup(handle, 0);
+    if (slot == NULL) {
+        set_error("sxt_secretstream_rekey: bad or wrong-mode handle");
+        return SXT_ERR_BADHANDLE;
+    }
+    crypto_secretstream_xchacha20poly1305_rekey(&slot->state);
+    return SXT_OK;
+}
+
 /* ---- File helpers (pure C; the plaintext never enters a LiveCode Data) --- */
 
 #define SXT_FILE_CHUNK 16384

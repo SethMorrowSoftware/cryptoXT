@@ -541,6 +541,53 @@ static void test_secretstream(void)
           "a freed handle is now stale -> BADHANDLE");
 }
 
+/* Explicit rekey: both sides must rekey at the same stream position to stay in
+ * sync; a one-sided rekey desyncs and the next chunk fails to verify. */
+static void test_secretstream_rekey(void)
+{
+    const unsigned char m1[3] = {'o', 'n', 'e'};
+    const unsigned char m2[3] = {'t', 'w', 'o'};
+    unsigned char key[32];
+    unsigned char header[24];
+    unsigned char c1[3 + 17], c2[3 + 17];
+    unsigned char pt[8];
+    int tag_msg = sxt_secretstream_tag_message();
+    int hpush, hpull;
+    int r;
+
+    printf("secretstream explicit rekey (forward secrecy in-session):\n");
+    memset(key, 0x77, sizeof key);
+
+    hpush = sxt_secretstream_init_push(header, (int)sizeof header, key, 32);
+    CHECK(hpush > 0, "init_push");
+    CHECK(sxt_secretstream_push(hpush, c1, (int)sizeof c1, m1, 3, NULL, 0, tag_msg) == 3 + 17, "push chunk 1");
+    CHECK(sxt_secretstream_rekey(hpush) == SXT_OK, "rekey push side");
+    CHECK(sxt_secretstream_push(hpush, c2, (int)sizeof c2, m2, 3, NULL, 0, tag_msg) == 3 + 17,
+          "push chunk 2 after rekey");
+
+    /* matched rekey: pull side rekeys at the same point and both chunks decrypt. */
+    hpull = sxt_secretstream_init_pull(header, (int)sizeof header, key, 32);
+    CHECK(hpull > 0, "init_pull");
+    r = sxt_secretstream_pull(hpull, pt, (int)sizeof pt, c1, (int)sizeof c1, NULL, 0);
+    CHECK(r == 3 && memcmp(pt, m1, 3) == 0, "pull chunk 1");
+    CHECK(sxt_secretstream_rekey(hpull) == SXT_OK, "rekey pull side (matched)");
+    r = sxt_secretstream_pull(hpull, pt, (int)sizeof pt, c2, (int)sizeof c2, NULL, 0);
+    CHECK(r == 3 && memcmp(pt, m2, 3) == 0, "pull chunk 2 after matched rekey");
+    sxt_free_stream(hpull);
+
+    /* one-sided rekey: pull WITHOUT rekeying after chunk 1 -> chunk 2 fails auth. */
+    hpull = sxt_secretstream_init_pull(header, (int)sizeof header, key, 32);
+    CHECK(hpull > 0, "init_pull (desync case)");
+    r = sxt_secretstream_pull(hpull, pt, (int)sizeof pt, c1, (int)sizeof c1, NULL, 0);
+    CHECK(r == 3, "pull chunk 1 (desync case)");
+    CHECK(sxt_secretstream_pull(hpull, pt, (int)sizeof pt, c2, (int)sizeof c2, NULL, 0) == SXT_ERR_AUTH,
+          "unmatched rekey -> next chunk fails auth");
+    sxt_free_stream(hpull);
+
+    CHECK(sxt_secretstream_rekey(999999) == SXT_ERR_BADHANDLE, "rekey on a bad handle -> BADHANDLE");
+    sxt_free_stream(hpush);
+}
+
 static int write_pattern_file(const char *path, int n)
 {
     FILE *f = fopen(path, "wb");
@@ -983,6 +1030,7 @@ int main(void)
     test_aead();
     test_pwhash();
     test_secretstream();
+    test_secretstream_rekey();
     test_file_helpers();
     test_sign();
     test_box();

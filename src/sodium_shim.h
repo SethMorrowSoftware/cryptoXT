@@ -322,6 +322,14 @@ SXT_API int SXT_CALL sxt_secretstream_pull(int handle, unsigned char *out, int c
                                            const unsigned char *in, int inlen,
                                            const unsigned char *ad, int adlen);
 SXT_API int SXT_CALL sxt_secretstream_last_tag(int handle);
+/*
+ * Force an explicit rekey of an open stream (crypto_secretstream_..._rekey): both
+ * the push and the pull side must call this at the same point in the stream to
+ * stay in sync (a one-sided rekey makes the next chunk fail to verify). Gives
+ * forward secrecy within a long-lived session without a new handshake. Returns
+ * SXT_OK, or SXT_ERR_BADHANDLE for a stale/unknown handle.
+ */
+SXT_API int SXT_CALL sxt_secretstream_rekey(int handle);
 SXT_API void SXT_CALL sxt_free_stream(int handle);
 
 /*

@@ -33,7 +33,7 @@
 --     parameter (e.g. the unkeyed-hash key); a plain Pointer rejects `nothing`;
 --   * out parameters are passed by reference: command form `sxBoxKeypair tPk, tSk`,
 --     or inside a function call `put sxSecretStreamInitPush(tKey, tHeader) into h`.
--- The native C layer is independently tested (KATs + ASan/UBSan, 177 checks);
+-- The native C layer is independently tested (KATs + ASan/UBSan, 189 checks);
 -- the current C ABI is SXT_ABI_VERSION 5 (kSXTABIVersion below must match).
 -- ==========================================================================
 
@@ -138,6 +138,7 @@ foreign handler _sxt_secretstream_push(in pHandle as CInt, in pOut as Pointer, i
 foreign handler _sxt_secretstream_init_pull(in pHeader as Pointer, in pHeaderLen as CInt, in pKey as Pointer, in pKeyLen as CInt) returns CInt binds to "c:sodiumxt>sxt_secretstream_init_pull"
 foreign handler _sxt_secretstream_pull(in pHandle as CInt, in pOut as Pointer, in pCap as CInt, in pIn as Pointer, in pInLen as CInt, in pAd as Pointer, in pAdLen as CInt) returns CInt binds to "c:sodiumxt>sxt_secretstream_pull"
 foreign handler _sxt_secretstream_last_tag(in pHandle as CInt) returns CInt binds to "c:sodiumxt>sxt_secretstream_last_tag"
+foreign handler _sxt_secretstream_rekey(in pHandle as CInt) returns CInt binds to "c:sodiumxt>sxt_secretstream_rekey"
 foreign handler _sxt_free_stream(in pHandle as CInt) returns nothing binds to "c:sodiumxt>sxt_free_stream"
 foreign handler _sxt_encrypt_file(in pSrc as ZStringUTF8, in pDst as ZStringUTF8, in pKey as Pointer, in pKeyLen as CInt) returns CInt binds to "c:sodiumxt>sxt_encrypt_file"
 foreign handler _sxt_decrypt_file(in pSrc as ZStringUTF8, in pDst as ZStringUTF8, in pKey as Pointer, in pKeyLen as CInt) returns CInt binds to "c:sodiumxt>sxt_decrypt_file"
@@ -842,6 +843,20 @@ public handler sxIsFinalTag(in pTag as Integer) returns Boolean
       put _sxt_secretstream_tag_final() into tFinal
    end unsafe
    return pTag is tFinal
+end handler
+
+-- Force a rekey of an open stream for forward secrecy within a long session.
+-- BOTH the push and the pull side must call this at the same point in the stream
+-- (a one-sided rekey desyncs and the next chunk fails to open).
+public handler sxSecretStreamRekey(in pHandle as Integer) returns nothing
+   variable tRc as Integer
+   sPrepare()
+   unsafe
+      put _sxt_secretstream_rekey(pHandle) into tRc
+   end unsafe
+   if tRc is not 0 then
+      throw "sxSecretStreamRekey:" && sLastError()
+   end if
 end handler
 
 public handler sxFreeStream(in pHandle as Integer) returns nothing

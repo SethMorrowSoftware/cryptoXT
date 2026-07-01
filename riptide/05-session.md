@@ -365,8 +365,9 @@ unrecoverable even from the live state. It costs one control frame per direction
 
 ```
 1. initiator -> peer: 0x23 body = bencode({ v:1, t:0x23, r: "s" })   -- "s" = secretstream rekey
-2. both peers: advance their push and pull streams' internal key (the secretstream rekey operation;
-   see 11-capabilities-required.md for the sxSecretStreamRekey entry SodiumXT must expose).
+2. both peers: advance their push and pull streams' internal key via `sxSecretStreamRekey`
+   (available in SodiumXT ABI 5; both sides must rekey at the same stream point or the next chunk
+   fails to open).
    The rekey point is deterministic: it takes effect on the chunk immediately after the 0x23 frame
    in each direction, so both sides advance at the same stream position.
 ```
