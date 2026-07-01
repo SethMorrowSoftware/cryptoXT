@@ -78,11 +78,28 @@ adds it here.
 | `rp-ratch` | mailbox chain key (32) | message counter | 32+32 | next chain key + message key (doc 06) |
 | `rp-sendr` | group room key (32) | member index | 32 | per-member sender key (doc 08) |
 | `rp-feedk` | feed master key (32) | epoch | 32 | feed read-key rotation (doc 07) |
+| `rp-cvsig` | cover-seed epoch secret (32) | epoch | 32 | reserved (optional): cover-seed recognition signing (doc 05) |
 
 Derivations from a **public key** (not a 32-byte secret), such as a mailbox inbox id, use `sxHash`
 instead of `sxKdfDerive`, because crypto_kdf requires a secret master key. Those are defined at their
 point of use with an explicit domain-separation tag, for example
 `inboxId = sxHash(recipientIK_x & be64(counter) & "rp-mbxid", 20)`.
+
+**Domain-separation tag registry.** Unlike KDF contexts (which are exactly 8 bytes), an `sxHash` /
+`sxHashKeyed` domain tag is an ASCII label of any length. To keep them collision-free across the
+spec, every tag is listed here; a channel that needs a new one adds it.
+
+| Tag | Used by |
+|---|---|
+| `rp-mbxid` | mailbox inbox id (doc 06) |
+| `rp-fc-meet/v1` | first-contact meeting id (doc 04) |
+| `rp-rndzv-pw/v1` | passphrase-derived rendezvous secret (doc 04) |
+| `rp-cover` | cover-swarm blend id (doc 04) |
+| `rp-cvrsd` | cover-seed recognition token (doc 05) |
+| `rp-room0` | local room label (doc 08) |
+
+Anti-abuse proof-of-work and capability-token tags are defined in
+[10-anti-abuse-and-privacy.md](10-anti-abuse-and-privacy.md).
 
 ## 3.5 Envelopes
 
@@ -126,7 +143,7 @@ channel so channel documents can claim values without collision.
 
 | Range | Channel | Examples |
 |---|---|---|
-| 0x01-0x0F | identity / control | 0x01 identity-card, 0x02 prekey-bundle, 0x03 idlog-entry |
+| 0x01-0x0F | identity / control | 0x01 identity-card, 0x02 prekey-bundle, 0x03 idlog-entry, 0x04 rendezvous-hello |
 | 0x10-0x1F | mailbox (doc 06) | 0x10 message, 0x11 ack, 0x12 prekey-consume |
 | 0x20-0x2F | session (doc 05) | 0x20 handshake-init, 0x21 handshake-resp, 0x22 data, 0x23 rekey |
 | 0x30-0x3F | feed / wall (doc 07) | 0x30 feed-entry, 0x31 wall-entry, 0x32 feed-key-update |
@@ -158,7 +175,10 @@ the bencoded value. Riptide produces this signature with `sxSignDetached(bep44Si
 because SodiumXT's ed25519 is the same primitive BEP44 uses, the result validates in any conformant
 DHT. Mutable records at guessable keys (an inbox derived from a public key) additionally require the
 anti-abuse gate of doc 10 before a node accepts the put in Riptide's own relay nodes; the public DHT
-does not enforce this, so treat inbox writability as open and defend at the application layer.
+does not enforce this, so treat inbox writability as open and defend at the application layer. Inbox
+writes carry the anti-abuse fields `w` (proof-of-work nonce) and/or `k` (capability token) defined in
+[10-anti-abuse-and-privacy.md](10-anti-abuse-and-privacy.md); a recipient checks these cheaply before
+spending effort to trial-decrypt.
 
 ## 3.8 Carrier: BEP10 peer-wire extension
 
@@ -211,5 +231,7 @@ check the adjacent epochs (`epoch-1`, `epoch+1`). All parties to a channel MUST 
 - `x || y` is concatenation; `be64(n)` is `n` as 8 big-endian bytes; `0^n` is `n` zero bytes.
 - `bencode(...)` is canonical bencode (3.2); `pad`, `sxSeal`, `sxKdfDerive`, etc. are the SodiumXT
   calls of 3.3.
-- `DHT.put(salt, seq, v, sig)` / `DHT.get(pub, salt)` and `DHT.announce(id)` / `DHT.getPeers(id)` are
-  the TorrentXT operations of doc 11.
+- `DHT.put(salt, seq, v, sig)` / `DHT.get(pub, salt)`, `DHT.putImmutable(v)` / `DHT.getImmutable(addr)`,
+  and `DHT.announce(id)` / `DHT.getPeers(id)` are the TorrentXT DHT operations; `PW.connect`,
+  `PW.send`, `PW.recv`, `PW.onConnect`, and `PW.handshakeDict` are the BEP10 peer-wire operations. All
+  are formalized in [11-capabilities-required.md](11-capabilities-required.md).
