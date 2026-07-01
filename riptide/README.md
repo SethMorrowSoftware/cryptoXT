@@ -62,6 +62,15 @@ Read in order for the first pass; the foundation (00-03) binds everything after 
 | [13-open-questions.md](13-open-questions.md) | Open questions | The research agenda and unresolved design forks |
 | [glossary.md](glossary.md) | Glossary | Terms and abbreviations |
 
+## Building Riptide
+
+Two meta-documents guide the implementation (they are not part of the numbered spec):
+
+- [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md) - the phased build order, the upstream capability
+  prerequisites, the test strategy, and the risk register.
+- [CLAUDE.md](CLAUDE.md) - operational guidance and the hard-won OXT / LCB / FFI lesson list carried
+  forward from the sibling extensions (Box2Dxt, ShowControl, TorrentXT, SodiumXT).
+
 ## The one-paragraph pitch
 
 One ed25519 keypair is your name on two networks. Your contacts find you at a meeting point only
