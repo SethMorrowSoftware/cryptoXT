@@ -690,6 +690,8 @@ on doSelfTest
    local tPk
    local tSk
    local tSig
+   local tR
+   local tInRange
    put 0 into sTPass
    put 0 into sTFail
    put "Running checks against" && sxVersion() & return & return into sTLog
@@ -710,8 +712,17 @@ on doSelfTest
    checkInto (sxSignVerifyDetached(tSig, textEncode("release", "utf-8"), tPk)), "ed25519 signature verifies"
    checkInto (not sxSignVerifyDetached(tSig, textEncode("RELEASE", "utf-8"), tPk)), "altered message fails verification"
 
-   -- the CSPRNG produces a value in range
-   checkInto (sxRandomUniform(2) >= 0), "uniform random produces a value"
+   -- the CSPRNG produces values strictly inside [0, upperBound) - check the
+   -- upper bound too (a bare ">= 0" can never fail, so it proves nothing)
+   put true into tInRange
+   repeat 256 times
+      put sxRandomUniform(2) into tR
+      if tR < 0 or tR >= 2 then
+         put false into tInRange
+         exit repeat
+      end if
+   end repeat
+   checkInto tInRange, "uniform random stays in [0, 2) over 256 draws"
 
    put return & (sTPass + sTFail) & " checks run." after sTLog
    put sTLog into field "about:out"

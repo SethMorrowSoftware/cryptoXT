@@ -307,6 +307,32 @@ static void test_encoding(void)
 
     /* 4 bytes need 9 (8 hex chars + NUL); a 2-byte buffer reports -needed. */
     CHECK(sxt_bin2hex(hex, 2, bin, 4) == -9, "bin2hex short buffer -> -needed (9)");
+
+    /* Regression guard for the LCB sxBase642Bin allocation (sodium.lcb): that
+     * wrapper sizes its out buffer as b64len + 4, so the C decoder must NOT
+     * report -needed for any valid input at that capacity, down to the smallest
+     * groups. The old wrapper allocated b64len + 1, which is one byte short for a
+     * 4-char group (needs 6, got 5): decoding "____" returned -6 and the LCB then
+     * threw, so a plain base64 round trip of any 3-byte value failed. */
+    {
+        int variant = sxt_base64_variant_urlsafe_no_padding();
+        /* the exact failing case, at the OLD (b64len + 1) capacity: -needed. */
+        CHECK(sxt_base642bin(back, 4 + 1, "____", 4, variant) == -6,
+              "base642bin(\"____\", cap=b64len+1) is one byte short -> -needed (6)");
+        /* the NEW (b64len + 4) capacity decodes the 3 bytes cleanly. */
+        r = sxt_base642bin(back, 4 + 4, "____", 4, variant);
+        CHECK(r == 3 && back[0] == 0xff && back[1] == 0xff && back[2] == 0xff,
+              "base642bin(\"____\", cap=b64len+4) decodes {ff,ff,ff}");
+        /* empty input at the wrapper capacity is a clean 0-byte decode. */
+        CHECK(sxt_base642bin(back, 0 + 4, "", 0, variant) == 0,
+              "base642bin(\"\", cap=b64len+4) decodes to 0 bytes");
+        /* a full round trip of a 3-byte value at the wrapper capacity. */
+        r = sxt_bin2base64(b64, (int)sizeof(b64), three, 3, variant);
+        CHECK(r == 4, "bin2base64(3 bytes) is a 4-char group");
+        CHECK(sxt_base642bin(back, r + 4, b64, r, variant) == 3 &&
+              memcmp(back, three, 3) == 0,
+              "base64 round trip of a 3-byte value at cap=b64len+4 succeeds");
+    }
 }
 
 static void test_memequal(void)

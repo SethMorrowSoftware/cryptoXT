@@ -260,8 +260,9 @@ ops.** The rules:
   is only "done" once `sodium_smoke_test.c` passes under ASan/UBSan and (for an ABI change)
   `SXT_ABI_VERSION` + `checkABI()` are bumped together.
 - A native-library change is only "done" once `tools/package-extension.py` has refreshed the
-  committed `src/code/<arch>-<platform>/` binary **in the same change** (CI rebuilds and
-  tests the full matrix).
+  committed `src/code/<arch>-<platform>/` binary **and** its `src/code/MANIFEST.sha256` entry
+  **in the same change** (the script does both; the CI `verify-binaries` job fails if a committed
+  blob is unlisted or does not match its recorded SHA256). CI rebuilds and tests the full matrix.
 - **No em-dashes** in committed prose or docs (house style). Use hyphens, commas, colons,
   parentheses.
 - **Match the surrounding style:** this codebase, like its siblings, comments the *why*,
