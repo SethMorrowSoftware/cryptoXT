@@ -33,8 +33,8 @@
 --     parameter (e.g. the unkeyed-hash key); a plain Pointer rejects `nothing`;
 --   * out parameters are passed by reference: command form `sxBoxKeypair tPk, tSk`,
 --     or inside a function call `put sxSecretStreamInitPush(tKey, tHeader) into h`.
--- The native C layer is independently tested (KATs + ASan/UBSan, 160 checks);
--- the current C ABI is SXT_ABI_VERSION 4 (kSXTABIVersion below must match).
+-- The native C layer is independently tested (KATs + ASan/UBSan, 177 checks);
+-- the current C ABI is SXT_ABI_VERSION 5 (kSXTABIVersion below must match).
 -- ==========================================================================
 
 library org.openxtalk.library.sodium
@@ -52,7 +52,7 @@ metadata summary    is "Modern cryptography for xTalk via libsodium (authenticat
 --   kSXTABIVersion == SXT_ABI_VERSION ; kSXTErrBase == SXT_ERR_BASE.
 -- Declared before first use (OXT resolves a constant by lexical position; a
 -- forward reference silently evaluates to nothing).
-constant kSXTABIVersion is 4
+constant kSXTABIVersion is 5
 constant kSXTErrBase is -2000000000
 
 -- The engine MCStringEncoding enum value for UTF-8 (libfoundation: ASCII=0,
@@ -145,6 +145,7 @@ foreign handler _sxt_decrypt_file(in pSrc as ZStringUTF8, in pDst as ZStringUTF8
 foreign handler _sxt_box_publickeybytes() returns CInt binds to "c:sodiumxt>sxt_box_publickeybytes"
 foreign handler _sxt_box_secretkeybytes() returns CInt binds to "c:sodiumxt>sxt_box_secretkeybytes"
 foreign handler _sxt_box_keypair(in pPk as Pointer, in pPkCap as CInt, in pSk as Pointer, in pSkCap as CInt) returns CInt binds to "c:sodiumxt>sxt_box_keypair"
+foreign handler _sxt_box_keypair_from_seed(in pPk as Pointer, in pPkCap as CInt, in pSk as Pointer, in pSkCap as CInt, in pSeed as Pointer, in pSeedLen as CInt) returns CInt binds to "c:sodiumxt>sxt_box_keypair_from_seed"
 foreign handler _sxt_box(in pOut as Pointer, in pCap as CInt, in pMsg as Pointer, in pMsgLen as CInt, in pRpk as Pointer, in pRpkLen as CInt, in pSsk as Pointer, in pSskLen as CInt) returns CInt binds to "c:sodiumxt>sxt_box"
 foreign handler _sxt_box_open(in pOut as Pointer, in pCap as CInt, in pBox as Pointer, in pBoxLen as CInt, in pSpk as Pointer, in pSpkLen as CInt, in pRsk as Pointer, in pRskLen as CInt) returns CInt binds to "c:sodiumxt>sxt_box_open"
 foreign handler _sxt_box_seal(in pOut as Pointer, in pCap as CInt, in pMsg as Pointer, in pMsgLen as CInt, in pRpk as Pointer, in pRpkLen as CInt) returns CInt binds to "c:sodiumxt>sxt_box_seal"
@@ -165,6 +166,7 @@ foreign handler _sxt_kx_publickeybytes() returns CInt binds to "c:sodiumxt>sxt_k
 foreign handler _sxt_kx_secretkeybytes() returns CInt binds to "c:sodiumxt>sxt_kx_secretkeybytes"
 foreign handler _sxt_kx_sessionkeybytes() returns CInt binds to "c:sodiumxt>sxt_kx_sessionkeybytes"
 foreign handler _sxt_kx_keypair(in pPk as Pointer, in pPkCap as CInt, in pSk as Pointer, in pSkCap as CInt) returns CInt binds to "c:sodiumxt>sxt_kx_keypair"
+foreign handler _sxt_kx_keypair_from_seed(in pPk as Pointer, in pPkCap as CInt, in pSk as Pointer, in pSkCap as CInt, in pSeed as Pointer, in pSeedLen as CInt) returns CInt binds to "c:sodiumxt>sxt_kx_keypair_from_seed"
 foreign handler _sxt_kx_client_session_keys(in pRx as Pointer, in pRxCap as CInt, in pTx as Pointer, in pTxCap as CInt, in pCpk as Pointer, in pCpkLen as CInt, in pCsk as Pointer, in pCskLen as CInt, in pSpk as Pointer, in pSpkLen as CInt) returns CInt binds to "c:sodiumxt>sxt_kx_client_session_keys"
 foreign handler _sxt_kx_server_session_keys(in pRx as Pointer, in pRxCap as CInt, in pTx as Pointer, in pTxCap as CInt, in pSpk as Pointer, in pSpkLen as CInt, in pSsk as Pointer, in pSskLen as CInt, in pCpk as Pointer, in pCpkLen as CInt) returns CInt binds to "c:sodiumxt>sxt_kx_server_session_keys"
 
@@ -912,6 +914,41 @@ public handler sxBoxKeypair(out rPublicKey as Data, out rSecretKey as Data) retu
    sFree(tSk)
 end handler
 
+-- Deterministic X25519 keypair from a 32-byte seed: the same seed always yields
+-- the same keypair, so a single master seed (e.g. a KDF subkey) can derive an
+-- encryption identity that is reconstructible from one backup. The seed length
+-- must be sxt_box_seedbytes (32); a wrong length throws.
+public handler sxBoxKeypairFromSeed(in pSeed as Data, out rPublicKey as Data, out rSecretKey as Data) returns nothing
+   variable tPk as Pointer
+   variable tSk as Pointer
+   variable tSeedPtr as Pointer
+   variable tSeedLen as Integer
+   variable tPkLen as Integer
+   variable tSkLen as Integer
+   variable tRc as Integer
+   sPrepare()
+   put sDataLen(pSeed) into tSeedLen
+   put sDataPtr(pSeed) into tSeedPtr
+   unsafe
+      put _sxt_box_publickeybytes() into tPkLen
+      put _sxt_box_secretkeybytes() into tSkLen
+   end unsafe
+   put sAlloc(tPkLen) into tPk
+   put sAlloc(tSkLen) into tSk
+   unsafe
+      put _sxt_box_keypair_from_seed(tPk, tPkLen, tSk, tSkLen, tSeedPtr, tSeedLen) into tRc
+   end unsafe
+   if tRc < 0 then
+      sFree(tPk)
+      sFree(tSk)
+      throw "sxBoxKeypairFromSeed:" && sLastError()
+   end if
+   put sToData(tPk, tPkLen) into rPublicKey
+   put sToData(tSk, tSkLen) into rSecretKey
+   sFree(tPk)
+   sFree(tSk)
+end handler
+
 public handler sxBox(in pMessage as Data, in pRecipientPk as Data, in pSenderSk as Data) returns Data
    variable tOut as Pointer
    variable tMsgPtr as Pointer
@@ -1166,6 +1203,40 @@ public handler sxKeyExchangeKeypair(out rPublicKey as Data, out rSecretKey as Da
       sFree(tPk)
       sFree(tSk)
       throw "sxKeyExchangeKeypair:" && sLastError()
+   end if
+   put sToData(tPk, tPkLen) into rPublicKey
+   put sToData(tSk, tSkLen) into rSecretKey
+   sFree(tPk)
+   sFree(tSk)
+end handler
+
+-- Deterministic kx keypair from a 32-byte seed (the companion to
+-- sxBoxKeypairFromSeed), so a master seed can also derive a key-exchange
+-- identity. The seed length must be sxt_kx_seedbytes (32); a wrong length throws.
+public handler sxKeyExchangeKeypairFromSeed(in pSeed as Data, out rPublicKey as Data, out rSecretKey as Data) returns nothing
+   variable tPk as Pointer
+   variable tSk as Pointer
+   variable tSeedPtr as Pointer
+   variable tSeedLen as Integer
+   variable tPkLen as Integer
+   variable tSkLen as Integer
+   variable tRc as Integer
+   sPrepare()
+   put sDataLen(pSeed) into tSeedLen
+   put sDataPtr(pSeed) into tSeedPtr
+   unsafe
+      put _sxt_kx_publickeybytes() into tPkLen
+      put _sxt_kx_secretkeybytes() into tSkLen
+   end unsafe
+   put sAlloc(tPkLen) into tPk
+   put sAlloc(tSkLen) into tSk
+   unsafe
+      put _sxt_kx_keypair_from_seed(tPk, tPkLen, tSk, tSkLen, tSeedPtr, tSeedLen) into tRc
+   end unsafe
+   if tRc < 0 then
+      sFree(tPk)
+      sFree(tSk)
+      throw "sxKeyExchangeKeypairFromSeed:" && sLastError()
    end if
    put sToData(tPk, tPkLen) into rPublicKey
    put sToData(tSk, tSkLen) into rSecretKey

@@ -24,11 +24,20 @@ edSeed  = sxKdfDerive(S, id=0, context="rp-ident", outlen=32)
         = cac73f09a0478224974a525036ebd73f9727ac8932162eb7fcfb2821ad7eecc7
 IK_pub  = sxSignKeypairFromSeed(edSeed).publicKey
         = 672e8e0b259627f15c772ec0d61f15cd786ce2bc7244549255f9d6cfaac300b2
+
+boxSeed = sxKdfDerive(S, id=1, context="rp-ident", outlen=32)
+IK_x_pub = sxBoxKeypairFromSeed(boxSeed).publicKey
+        = 5b9d094b6c0de5c16b3605cffd6d056144384855f82d02c352c5cffd3b60bf65
+kxSeed  = sxKdfDerive(S, id=2, context="rp-ident", outlen=32)
+KX_pub  = sxKeyExchangeKeypairFromSeed(kxSeed).publicKey
+        = 4a9789d887a6dcb2246f1a03833dab4c6c77c57633caef004190ba5f990a3d35
 ```
 
-`IK_pub` is the identity's name and the key under which its BEP44 records live. (Encryption-key
-derivation at ids 1 and 2 is pinned once SodiumXT exposes seeded box/kx keypairs; see
-[02-identity.md](02-identity.md) section 2.2 and [11-capabilities-required.md](11-capabilities-required.md).)
+`IK_pub` is the identity's name and the key under which its BEP44 records live; `IK_x_pub` and
+`KX_pub` are the encryption keys others use to reach you. All three derive from the one master seed
+`S` via the seeded-keypair calls SodiumXT added at ABI 5 (see [02-identity.md](02-identity.md)
+section 2.2 and [11-capabilities-required.md](11-capabilities-required.md)), so one backup blob
+reconstructs the whole identity.
 
 ## 12.2 Rendezvous id (doc 04, label `rp-rndzv`)
 

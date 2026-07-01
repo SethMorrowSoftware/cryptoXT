@@ -44,7 +44,7 @@ extern "C" {
  * clear "reinstall the extension" error on skew, instead of corrupting memory
  * on first use against a mismatched native library.
  */
-#define SXT_ABI_VERSION 4
+#define SXT_ABI_VERSION 5
 
 /*
  * The largest single in-memory out-buffer we will service. The return value of
@@ -344,6 +344,7 @@ SXT_API int SXT_CALL sxt_box_secretkeybytes(void);
 SXT_API int SXT_CALL sxt_box_noncebytes(void);
 SXT_API int SXT_CALL sxt_box_macbytes(void);
 SXT_API int SXT_CALL sxt_box_sealbytes(void);
+SXT_API int SXT_CALL sxt_box_seedbytes(void);   /* seed size for the seeded keypair (32) */
 
 /*
  * Generate an X25519 keypair: writes publickeybytes into pk_out and
@@ -353,6 +354,15 @@ SXT_API int SXT_CALL sxt_box_sealbytes(void);
  */
 SXT_API int SXT_CALL sxt_box_keypair(unsigned char *pk_out, int pk_cap,
                                      unsigned char *sk_out, int sk_cap);
+/*
+ * Deterministic X25519 keypair from a seedbytes seed (crypto_box_seed_keypair):
+ * the same seed always yields the same keypair. This is what lets a single master
+ * seed derive an encryption keypair (a subkey from the KDF), so one backup blob
+ * reconstructs the whole identity. seed must be exactly seedbytes.
+ */
+SXT_API int SXT_CALL sxt_box_keypair_from_seed(unsigned char *pk_out, int pk_cap,
+                                               unsigned char *sk_out, int sk_cap,
+                                               const unsigned char *seed, int seedlen);
 /*
  * Authenticated public-key encryption from sender_sk to recipient_pk, with a
  * fresh random nonce prepended (output is noncebytes + msglen + macbytes). Open
@@ -439,6 +449,7 @@ SXT_API int SXT_CALL sxt_kdf_derive(unsigned char *out, int cap, int subkeylen,
 SXT_API int SXT_CALL sxt_kx_publickeybytes(void);
 SXT_API int SXT_CALL sxt_kx_secretkeybytes(void);
 SXT_API int SXT_CALL sxt_kx_sessionkeybytes(void);
+SXT_API int SXT_CALL sxt_kx_seedbytes(void);   /* seed size for the seeded keypair (32) */
 
 /*
  * Key exchange. kx_keypair makes an X25519 keypair. Each side then derives the
@@ -448,6 +459,14 @@ SXT_API int SXT_CALL sxt_kx_sessionkeybytes(void);
  */
 SXT_API int SXT_CALL sxt_kx_keypair(unsigned char *pk_out, int pk_cap,
                                     unsigned char *sk_out, int sk_cap);
+/*
+ * Deterministic kx keypair from a seedbytes seed (crypto_kx_seed_keypair): the
+ * companion to sxt_box_keypair_from_seed, so a master seed can also derive a
+ * key-exchange keypair. seed must be exactly seedbytes.
+ */
+SXT_API int SXT_CALL sxt_kx_keypair_from_seed(unsigned char *pk_out, int pk_cap,
+                                              unsigned char *sk_out, int sk_cap,
+                                              const unsigned char *seed, int seedlen);
 SXT_API int SXT_CALL sxt_kx_client_session_keys(unsigned char *rx_out, int rx_cap,
                                                 unsigned char *tx_out, int tx_cap,
                                                 const unsigned char *client_pk, int client_pklen,

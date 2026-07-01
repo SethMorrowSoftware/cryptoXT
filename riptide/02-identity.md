@@ -31,14 +31,12 @@ edSeed = sxKdfDerive(S, "0", <"rp-ident">, 32)
 sxSignKeypairFromSeed edSeed -> IK_pub (32), IK_sec (64)     -- your name and DHT identity
 ```
 
-**Capability dependency.** `sxSignKeypairFromSeed` already derives the signing key deterministically.
-The encryption keys (ids 1 and 2) require **seeded** X25519/kx keypairs
-(`crypto_box_seed_keypair` / `crypto_kx_seed_keypair`) or the ed25519-to-X25519 conversion, which
-SodiumXT does not yet expose ([11-capabilities-required.md](11-capabilities-required.md)). Until it
-does, a client generates `IK_x` and `KX` once with `sxBoxKeypair` / `sxKeyExchangeKeypair` and
-stores them beside `S`. The derivation above is the canonical target and becomes authoritative when
-the seeded-keypair capability lands. Test vectors ([12](12-conformance-vectors.md)) pin id 0 now and
-ids 1-2 once the capability exists.
+**Capability status: available (SodiumXT ABI 5).** All three keys derive deterministically from `S`:
+`sxSignKeypairFromSeed` for the signing key (id 0), and the seeded-keypair calls
+`sxBoxKeypairFromSeed` (id 1) and `sxKeyExchangeKeypairFromSeed` (id 2) for the encryption keys, added
+to SodiumXT for exactly this purpose ([11-capabilities-required.md](11-capabilities-required.md)). One
+master seed therefore reconstructs the whole identity; no separate keypair storage is required. All
+three ids are pinned in the conformance vectors ([12-conformance-vectors.md](12-conformance-vectors.md)).
 
 ## 2.3 Public identity
 

@@ -784,6 +784,57 @@ static void test_kx(void)
     CHECK(memcmp(ctx, srx, 32) == 0, "client tx equals server rx");
 }
 
+/* Seeded (deterministic) box + kx keypairs, ABI 5: a single master seed can
+ * derive an encryption keypair, so one backup blob reconstructs the identity.
+ * KATs pin the fixed-seed public keys so a silent libsodium change would fail. */
+static void test_seeded_keypairs(void)
+{
+    unsigned char seed[32];
+    unsigned char pk1[32], sk1[32], pk2[32], sk2[32];
+    unsigned char kpk[32], ksk[32];
+    char hex[2 * 32 + 1];
+
+    printf("seeded box/kx keypairs (deterministic, ABI 5):\n");
+    memset(seed, 0x42, sizeof seed);
+
+    CHECK(sxt_box_seedbytes() == 32, "box seedbytes is 32");
+    CHECK(sxt_kx_seedbytes() == 32, "kx seedbytes is 32");
+
+    /* deterministic: the same seed yields the same box keypair, and it matches
+     * the published crypto_box_seed_keypair vector for seed = 0x42 x 32. */
+    CHECK(sxt_box_keypair_from_seed(pk1, 32, sk1, 32, seed, 32) == SXT_OK, "box seeded keypair");
+    CHECK(sxt_box_keypair_from_seed(pk2, 32, sk2, 32, seed, 32) == SXT_OK, "box seeded keypair (again)");
+    CHECK(memcmp(pk1, pk2, 32) == 0 && memcmp(sk1, sk2, 32) == 0,
+          "box seeded keypair is deterministic");
+    sxt_bin2hex(hex, (int)sizeof hex, pk1, 32);
+    CHECK(strcmp(hex, "cc4f2cdb695dd766f34118eb67b98652fed1d8bc49c330b119bbfa8a64989378") == 0,
+          "box seeded pubkey (seed 0x42x32) matches the KAT");
+
+    /* the seeded secret key really corresponds to the public key: a sealed box to
+     * pk1 opens with (pk1, sk1). */
+    {
+        const unsigned char msg[3] = {'h', 'i', '!'};
+        unsigned char sealed[3 + 48];
+        unsigned char plain[8];
+        int sl = sxt_box_seal(sealed, (int)sizeof sealed, msg, 3, pk1, 32);
+        CHECK(sl == 3 + 48, "seal to the seeded pubkey");
+        CHECK(sxt_box_seal_open(plain, (int)sizeof plain, sealed, sl, pk1, 32, sk1, 32) == 3 &&
+              memcmp(plain, msg, 3) == 0, "seeded keypair opens its own sealed box");
+    }
+
+    /* kx seeded keypair: deterministic + KAT for the same seed. */
+    CHECK(sxt_kx_keypair_from_seed(kpk, 32, ksk, 32, seed, 32) == SXT_OK, "kx seeded keypair");
+    sxt_bin2hex(hex, (int)sizeof hex, kpk, 32);
+    CHECK(strcmp(hex, "191957342799412f1a3cbeae3d3af8cf5441f2fb51d88a8c2a56175f1fae3f3a") == 0,
+          "kx seeded pubkey (seed 0x42x32) matches the KAT");
+
+    /* wrong seed length is a clean BADARG, not a crash. */
+    CHECK(sxt_box_keypair_from_seed(pk1, 32, sk1, 32, seed, 16) == SXT_ERR_BADARG,
+          "box wrong seed length -> BADARG");
+    CHECK(sxt_kx_keypair_from_seed(kpk, 32, ksk, 32, seed, 31) == SXT_ERR_BADARG,
+          "kx wrong seed length -> BADARG");
+}
+
 static void test_pad(void)
 {
     unsigned char buf[32];
@@ -937,6 +988,7 @@ int main(void)
     test_box();
     test_kdf();
     test_kx();
+    test_seeded_keypairs();
     test_pad();
     test_phase6();
 
