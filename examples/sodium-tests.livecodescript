@@ -36,11 +36,13 @@ function sxSelfTest
    testPwHash
    testKdf
    testSecretStream
+   testStreamRekey
    testFileHelpers
    testSign
    testBox
    testSeal
    testKeyExchange
+   testSeededKeypairs
    testPadding
    testHashExtras
 
@@ -236,6 +238,48 @@ on testSecretStream
    sxCheck (sxIsFinalTag(tTag2) is true), "final chunk carries the FINAL tag"
 end testSecretStream
 
+on testStreamRekey
+   local tKey
+   local tHeader
+   local tNoAd
+   local tPushH
+   local tPullH
+   local tC1
+   local tC2
+   local tTag
+   local tP1
+   local tP2
+   local tOk
+   sxSection "secretstream rekey (in-session forward secrecy)"
+   put sxRandomBytes(32) into tKey
+   put sxUtf8("") into tNoAd
+   -- push a chunk, rekey the push side, push another chunk
+   put sxSecretStreamInitPush(tKey, tHeader) into tPushH
+   put sxSecretStreamPush(tPushH, sxUtf8("before"), tNoAd, false) into tC1
+   sxSecretStreamRekey tPushH
+   put sxSecretStreamPush(tPushH, sxUtf8("after"), tNoAd, true) into tC2
+   sxFreeStream tPushH
+   -- matched rekey: the pull side rekeys at the same point, both chunks decrypt
+   put sxSecretStreamInitPull(tKey, tHeader) into tPullH
+   put sxSecretStreamPull(tPullH, tC1, tNoAd, tTag) into tP1
+   sxSecretStreamRekey tPullH
+   put sxSecretStreamPull(tPullH, tC2, tNoAd, tTag) into tP2
+   sxFreeStream tPullH
+   sxCheck (textDecode(tP1, "utf-8") is "before"), "chunk before the rekey decrypts"
+   sxCheck (textDecode(tP2, "utf-8") is "after"), "chunk after a matched rekey decrypts"
+   -- one-sided rekey desyncs: pulling the second chunk without rekeying must fail
+   put false into tOk
+   put sxSecretStreamInitPull(tKey, tHeader) into tPullH
+   get sxSecretStreamPull(tPullH, tC1, tNoAd, tTag)
+   try
+      get sxSecretStreamPull(tPullH, tC2, tNoAd, tTag)
+   catch tErr
+      put true into tOk
+   end try
+   sxFreeStream tPullH
+   sxCheck tOk, "an unmatched rekey makes the next chunk fail to open"
+end testStreamRekey
+
 on testFileHelpers
    local tKey
    local tSrc
@@ -321,6 +365,50 @@ on testKeyExchange
    sxCheck (sxMemEqual(tCrx, tStx) is true), "client rx equals server tx"
    sxCheck (sxMemEqual(tCtx, tSrx) is true), "client tx equals server rx"
 end testKeyExchange
+
+on testSeededKeypairs
+   local tSeed
+   local tPk1
+   local tSk1
+   local tPk2
+   local tSk2
+   local tSealed
+   local tKpk
+   local tKsk
+   local tRpk
+   local tRsk
+   local tCrx
+   local tCtx
+   local tSrx
+   local tStx
+   sxSection "seeded keypairs (deterministic one-seed identity)"
+   -- a fixed 32-byte seed: "B" is 0x42, so this is 0x42 repeated 32 times, the
+   -- same seed the native known-answer test uses.
+   put textEncode("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", "ascii") into tSeed
+
+   -- box keypair: deterministic, and the pubkey matches the known-answer vector
+   sxBoxKeypairFromSeed tSeed, tPk1, tSk1
+   sxBoxKeypairFromSeed tSeed, tPk2, tSk2
+   sxCheck (sxMemEqual(tPk1, tPk2) is true and sxMemEqual(tSk1, tSk2) is true), \
+      "sxBoxKeypairFromSeed is deterministic"
+   sxCheck (sxHexOf(tPk1) is \
+      "cc4f2cdb695dd766f34118eb67b98652fed1d8bc49c330b119bbfa8a64989378"), \
+      "seeded box pubkey matches the known-answer vector"
+   -- functional: a sealed box to the derived pubkey opens with the derived keypair
+   put sxSeal(sxUtf8("seeded identity"), tPk1) into tSealed
+   sxCheck (textDecode(sxSealOpen(tSealed, tPk1, tSk1), "utf-8") is "seeded identity"), \
+      "the seeded box keypair opens its own sealed box"
+
+   -- kx keypair: deterministic pubkey (KAT) + a working agreement with a peer
+   sxKeyExchangeKeypairFromSeed tSeed, tKpk, tKsk
+   sxCheck (sxHexOf(tKpk) is \
+      "191957342799412f1a3cbeae3d3af8cf5441f2fb51d88a8c2a56175f1fae3f3a"), \
+      "seeded kx pubkey matches the known-answer vector"
+   sxKeyExchangeKeypair tRpk, tRsk
+   sxKeyExchangeClient tKpk, tKsk, tRpk, tCrx, tCtx
+   sxKeyExchangeServer tRpk, tRsk, tKpk, tSrx, tStx
+   sxCheck (sxMemEqual(tCrx, tStx) is true), "a seeded kx keypair agrees a session key"
+end testSeededKeypairs
 
 on testPadding
    local tPadded

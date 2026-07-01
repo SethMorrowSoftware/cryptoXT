@@ -541,6 +541,53 @@ static void test_secretstream(void)
           "a freed handle is now stale -> BADHANDLE");
 }
 
+/* Explicit rekey: both sides must rekey at the same stream position to stay in
+ * sync; a one-sided rekey desyncs and the next chunk fails to verify. */
+static void test_secretstream_rekey(void)
+{
+    const unsigned char m1[3] = {'o', 'n', 'e'};
+    const unsigned char m2[3] = {'t', 'w', 'o'};
+    unsigned char key[32];
+    unsigned char header[24];
+    unsigned char c1[3 + 17], c2[3 + 17];
+    unsigned char pt[8];
+    int tag_msg = sxt_secretstream_tag_message();
+    int hpush, hpull;
+    int r;
+
+    printf("secretstream explicit rekey (forward secrecy in-session):\n");
+    memset(key, 0x77, sizeof key);
+
+    hpush = sxt_secretstream_init_push(header, (int)sizeof header, key, 32);
+    CHECK(hpush > 0, "init_push");
+    CHECK(sxt_secretstream_push(hpush, c1, (int)sizeof c1, m1, 3, NULL, 0, tag_msg) == 3 + 17, "push chunk 1");
+    CHECK(sxt_secretstream_rekey(hpush) == SXT_OK, "rekey push side");
+    CHECK(sxt_secretstream_push(hpush, c2, (int)sizeof c2, m2, 3, NULL, 0, tag_msg) == 3 + 17,
+          "push chunk 2 after rekey");
+
+    /* matched rekey: pull side rekeys at the same point and both chunks decrypt. */
+    hpull = sxt_secretstream_init_pull(header, (int)sizeof header, key, 32);
+    CHECK(hpull > 0, "init_pull");
+    r = sxt_secretstream_pull(hpull, pt, (int)sizeof pt, c1, (int)sizeof c1, NULL, 0);
+    CHECK(r == 3 && memcmp(pt, m1, 3) == 0, "pull chunk 1");
+    CHECK(sxt_secretstream_rekey(hpull) == SXT_OK, "rekey pull side (matched)");
+    r = sxt_secretstream_pull(hpull, pt, (int)sizeof pt, c2, (int)sizeof c2, NULL, 0);
+    CHECK(r == 3 && memcmp(pt, m2, 3) == 0, "pull chunk 2 after matched rekey");
+    sxt_free_stream(hpull);
+
+    /* one-sided rekey: pull WITHOUT rekeying after chunk 1 -> chunk 2 fails auth. */
+    hpull = sxt_secretstream_init_pull(header, (int)sizeof header, key, 32);
+    CHECK(hpull > 0, "init_pull (desync case)");
+    r = sxt_secretstream_pull(hpull, pt, (int)sizeof pt, c1, (int)sizeof c1, NULL, 0);
+    CHECK(r == 3, "pull chunk 1 (desync case)");
+    CHECK(sxt_secretstream_pull(hpull, pt, (int)sizeof pt, c2, (int)sizeof c2, NULL, 0) == SXT_ERR_AUTH,
+          "unmatched rekey -> next chunk fails auth");
+    sxt_free_stream(hpull);
+
+    CHECK(sxt_secretstream_rekey(999999) == SXT_ERR_BADHANDLE, "rekey on a bad handle -> BADHANDLE");
+    sxt_free_stream(hpush);
+}
+
 static int write_pattern_file(const char *path, int n)
 {
     FILE *f = fopen(path, "wb");
@@ -784,6 +831,57 @@ static void test_kx(void)
     CHECK(memcmp(ctx, srx, 32) == 0, "client tx equals server rx");
 }
 
+/* Seeded (deterministic) box + kx keypairs, ABI 5: a single master seed can
+ * derive an encryption keypair, so one backup blob reconstructs the identity.
+ * KATs pin the fixed-seed public keys so a silent libsodium change would fail. */
+static void test_seeded_keypairs(void)
+{
+    unsigned char seed[32];
+    unsigned char pk1[32], sk1[32], pk2[32], sk2[32];
+    unsigned char kpk[32], ksk[32];
+    char hex[2 * 32 + 1];
+
+    printf("seeded box/kx keypairs (deterministic, ABI 5):\n");
+    memset(seed, 0x42, sizeof seed);
+
+    CHECK(sxt_box_seedbytes() == 32, "box seedbytes is 32");
+    CHECK(sxt_kx_seedbytes() == 32, "kx seedbytes is 32");
+
+    /* deterministic: the same seed yields the same box keypair, and it matches
+     * the published crypto_box_seed_keypair vector for seed = 0x42 x 32. */
+    CHECK(sxt_box_keypair_from_seed(pk1, 32, sk1, 32, seed, 32) == SXT_OK, "box seeded keypair");
+    CHECK(sxt_box_keypair_from_seed(pk2, 32, sk2, 32, seed, 32) == SXT_OK, "box seeded keypair (again)");
+    CHECK(memcmp(pk1, pk2, 32) == 0 && memcmp(sk1, sk2, 32) == 0,
+          "box seeded keypair is deterministic");
+    sxt_bin2hex(hex, (int)sizeof hex, pk1, 32);
+    CHECK(strcmp(hex, "cc4f2cdb695dd766f34118eb67b98652fed1d8bc49c330b119bbfa8a64989378") == 0,
+          "box seeded pubkey (seed 0x42x32) matches the KAT");
+
+    /* the seeded secret key really corresponds to the public key: a sealed box to
+     * pk1 opens with (pk1, sk1). */
+    {
+        const unsigned char msg[3] = {'h', 'i', '!'};
+        unsigned char sealed[3 + 48];
+        unsigned char plain[8];
+        int sl = sxt_box_seal(sealed, (int)sizeof sealed, msg, 3, pk1, 32);
+        CHECK(sl == 3 + 48, "seal to the seeded pubkey");
+        CHECK(sxt_box_seal_open(plain, (int)sizeof plain, sealed, sl, pk1, 32, sk1, 32) == 3 &&
+              memcmp(plain, msg, 3) == 0, "seeded keypair opens its own sealed box");
+    }
+
+    /* kx seeded keypair: deterministic + KAT for the same seed. */
+    CHECK(sxt_kx_keypair_from_seed(kpk, 32, ksk, 32, seed, 32) == SXT_OK, "kx seeded keypair");
+    sxt_bin2hex(hex, (int)sizeof hex, kpk, 32);
+    CHECK(strcmp(hex, "191957342799412f1a3cbeae3d3af8cf5441f2fb51d88a8c2a56175f1fae3f3a") == 0,
+          "kx seeded pubkey (seed 0x42x32) matches the KAT");
+
+    /* wrong seed length is a clean BADARG, not a crash. */
+    CHECK(sxt_box_keypair_from_seed(pk1, 32, sk1, 32, seed, 16) == SXT_ERR_BADARG,
+          "box wrong seed length -> BADARG");
+    CHECK(sxt_kx_keypair_from_seed(kpk, 32, ksk, 32, seed, 31) == SXT_ERR_BADARG,
+          "kx wrong seed length -> BADARG");
+}
+
 static void test_pad(void)
 {
     unsigned char buf[32];
@@ -932,11 +1030,13 @@ int main(void)
     test_aead();
     test_pwhash();
     test_secretstream();
+    test_secretstream_rekey();
     test_file_helpers();
     test_sign();
     test_box();
     test_kdf();
     test_kx();
+    test_seeded_keypairs();
     test_pad();
     test_phase6();
 

@@ -56,7 +56,16 @@ deterministically from the same master seed as the signing key.
 
 ### 11.1.2 GAP: seeded X25519 / kx keypairs (one-seed identity)
 
-This is the only crypto gap that blocks a canonical design, and it is small.
+> **STATUS: SHIPPED in SodiumXT ABI 5.** Delivered as `sxBoxKeypairFromSeed(pSeed, out rPk, out rSk)`
+> and `sxKeyExchangeKeypairFromSeed(pSeed, out rPk, out rSk)` (C ABI `sxt_box_keypair_from_seed` /
+> `sxt_kx_keypair_from_seed`, named to mirror the existing `sxt_sign_keypair_from_seed`), with the
+> `sxt_box_seedbytes()` / `sxt_kx_seedbytes()` length getters. `SXT_ABI_VERSION` and `kSXTABIVersion`
+> were bumped 4 -> 5 together. The one-seed identity of [02-identity.md](02-identity.md) is therefore
+> fully derivable now, and all three identity ids are pinned in
+> [12-conformance-vectors.md](12-conformance-vectors.md). The proposal below is kept as the design
+> record (the shipped C-symbol names differ slightly from the names proposed here).
+
+This was the only crypto gap that blocked a canonical design, and it was small.
 
 **Why.** [02-identity.md](02-identity.md) sec 2.2 derives all subkeys from one 32-byte master seed
 `S`: id 0 becomes the ed25519 identity keypair via `sxSignKeypairFromSeed` (already deterministic),

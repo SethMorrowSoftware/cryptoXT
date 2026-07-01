@@ -49,6 +49,19 @@ int main(void)
     check("12.1 IK_pub", ikpub, sizeof ikpub,
           "672e8e0b259627f15c772ec0d61f15cd786ce2bc7244549255f9d6cfaac300b2");
 
+    /* 12.1 encryption keys: boxSeed = KDF(S, id=1, "rp-ident"); kxSeed = KDF(S, id=2, ...) */
+    unsigned char box_seed[32], kx_seed[32];
+    crypto_kdf_derive_from_key(box_seed, sizeof box_seed, 1, "rp-ident", S);
+    crypto_kdf_derive_from_key(kx_seed, sizeof kx_seed, 2, "rp-ident", S);
+    unsigned char ikx_pk[crypto_box_PUBLICKEYBYTES], ikx_sk[crypto_box_SECRETKEYBYTES];
+    crypto_box_seed_keypair(ikx_pk, ikx_sk, box_seed);
+    check("12.1 IK_x_pub", ikx_pk, sizeof ikx_pk,
+          "5b9d094b6c0de5c16b3605cffd6d056144384855f82d02c352c5cffd3b60bf65");
+    unsigned char kx_pk[crypto_kx_PUBLICKEYBYTES], kx_sk[crypto_kx_SECRETKEYBYTES];
+    crypto_kx_seed_keypair(kx_pk, kx_sk, kx_seed);
+    check("12.1 KX_pub", kx_pk, sizeof kx_pk,
+          "4a9789d887a6dcb2246f1a03833dab4c6c77c57633caef004190ba5f990a3d35");
+
     /* 12.2 rendezvous id = KDF(ss, id=471000, "rp-rndzv", 20) */
     unsigned char ss[32]; memset(ss, 0x42, sizeof ss);
     unsigned char rid[20];

@@ -1129,6 +1129,21 @@ SXT_API int SXT_CALL sxt_secretstream_last_tag(int handle)
     return slot->last_tag;
 }
 
+SXT_API int SXT_CALL sxt_secretstream_rekey(int handle)
+{
+    sxt_stream_slot *slot;
+    clear_error();
+    /* Works on either direction: both push and pull rekey their own state at the
+     * matching point in the stream. want_mode 0 accepts a push or a pull slot. */
+    slot = stream_lookup(handle, 0);
+    if (slot == NULL) {
+        set_error("sxt_secretstream_rekey: bad or wrong-mode handle");
+        return SXT_ERR_BADHANDLE;
+    }
+    crypto_secretstream_xchacha20poly1305_rekey(&slot->state);
+    return SXT_OK;
+}
+
 /* ---- File helpers (pure C; the plaintext never enters a LiveCode Data) --- */
 
 #define SXT_FILE_CHUNK 16384
@@ -1328,6 +1343,7 @@ SXT_API int SXT_CALL sxt_box_secretkeybytes(void) { return (int)crypto_box_SECRE
 SXT_API int SXT_CALL sxt_box_noncebytes(void)     { return (int)crypto_box_NONCEBYTES; }
 SXT_API int SXT_CALL sxt_box_macbytes(void)       { return (int)crypto_box_MACBYTES; }
 SXT_API int SXT_CALL sxt_box_sealbytes(void)      { return (int)crypto_box_SEALBYTES; }
+SXT_API int SXT_CALL sxt_box_seedbytes(void)      { return (int)crypto_box_SEEDBYTES; }
 
 SXT_API int SXT_CALL sxt_box_keypair(unsigned char *pk_out, int pk_cap,
                                      unsigned char *sk_out, int sk_cap)
@@ -1345,6 +1361,30 @@ SXT_API int SXT_CALL sxt_box_keypair(unsigned char *pk_out, int pk_cap,
         return SXT_ERR_BADARG;
     }
     crypto_box_keypair(pk_out, sk_out);
+    return SXT_OK;
+}
+
+SXT_API int SXT_CALL sxt_box_keypair_from_seed(unsigned char *pk_out, int pk_cap,
+                                               unsigned char *sk_out, int sk_cap,
+                                               const unsigned char *seed, int seedlen)
+{
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (seedlen != (int)crypto_box_SEEDBYTES) {
+        set_error("sxt_box_keypair_from_seed: wrong seed length");
+        return SXT_ERR_BADARG;
+    }
+    if (pk_cap < (int)crypto_box_PUBLICKEYBYTES || sk_cap < (int)crypto_box_SECRETKEYBYTES) {
+        set_error("sxt_box_keypair_from_seed: output buffer too small");
+        return SXT_ERR_BADARG;
+    }
+    if (pk_out == NULL || sk_out == NULL || seed == NULL) {
+        set_error("sxt_box_keypair_from_seed: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    crypto_box_seed_keypair(pk_out, sk_out, seed);
     return SXT_OK;
 }
 
@@ -1771,6 +1811,7 @@ SXT_API int SXT_CALL sxt_kdf_derive(unsigned char *out, int cap, int subkeylen,
 SXT_API int SXT_CALL sxt_kx_publickeybytes(void)  { return (int)crypto_kx_PUBLICKEYBYTES; }
 SXT_API int SXT_CALL sxt_kx_secretkeybytes(void)  { return (int)crypto_kx_SECRETKEYBYTES; }
 SXT_API int SXT_CALL sxt_kx_sessionkeybytes(void) { return (int)crypto_kx_SESSIONKEYBYTES; }
+SXT_API int SXT_CALL sxt_kx_seedbytes(void)       { return (int)crypto_kx_SEEDBYTES; }
 
 SXT_API int SXT_CALL sxt_kx_keypair(unsigned char *pk_out, int pk_cap,
                                     unsigned char *sk_out, int sk_cap)
@@ -1788,6 +1829,30 @@ SXT_API int SXT_CALL sxt_kx_keypair(unsigned char *pk_out, int pk_cap,
         return SXT_ERR_BADARG;
     }
     crypto_kx_keypair(pk_out, sk_out);
+    return SXT_OK;
+}
+
+SXT_API int SXT_CALL sxt_kx_keypair_from_seed(unsigned char *pk_out, int pk_cap,
+                                              unsigned char *sk_out, int sk_cap,
+                                              const unsigned char *seed, int seedlen)
+{
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (seedlen != (int)crypto_kx_SEEDBYTES) {
+        set_error("sxt_kx_keypair_from_seed: wrong seed length");
+        return SXT_ERR_BADARG;
+    }
+    if (pk_cap < (int)crypto_kx_PUBLICKEYBYTES || sk_cap < (int)crypto_kx_SECRETKEYBYTES) {
+        set_error("sxt_kx_keypair_from_seed: output buffer too small");
+        return SXT_ERR_BADARG;
+    }
+    if (pk_out == NULL || sk_out == NULL || seed == NULL) {
+        set_error("sxt_kx_keypair_from_seed: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    crypto_kx_seed_keypair(pk_out, sk_out, seed);
     return SXT_OK;
 }
 

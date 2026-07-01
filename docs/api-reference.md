@@ -134,6 +134,7 @@ deterministic unload hook.
 | `sxSecretStreamInitPull(pKey, pHeader)` | `Integer` | Open a decrypt stream from the header; returns a handle. |
 | `sxSecretStreamPull(pHandle, pCipherChunk, pAd, out rTag)` | `Data` | Decrypt one chunk; fills `rTag`. Throws on wrong key / tamper. |
 | `sxIsFinalTag(pTag)` | `Boolean` | True if `rTag` is the FINAL tag (the stream ended cleanly). |
+| `sxSecretStreamRekey(pHandle)` | command | Force a rekey of an open stream for in-session forward secrecy. Both the push and the pull side must call it at the same point in the stream (a one-sided rekey desyncs). |
 | `sxFreeStream(pHandle)` | command | Release a stream handle (idempotent). |
 | `sxEncryptFile(pSrcPath, pDstPath, pKey)` | command | Encrypt a file entirely C-side (bytes never enter a `Data`). Throws on I/O error. |
 | `sxDecryptFile(pSrcPath, pDstPath, pKey)` | command | Decrypt; throws on a wrong key or a truncated/corrupt input. |
@@ -143,6 +144,7 @@ deterministic unload hook.
 | Handler | Returns | Notes |
 |---|---|---|
 | `sxBoxKeypair(out rPublicKey, out rSecretKey)` | command | Generate an X25519 keypair. |
+| `sxBoxKeypairFromSeed(pSeed, out rPublicKey, out rSecretKey)` | command | Deterministic X25519 keypair from a 32-byte seed (same seed gives the same keypair, so one master seed can derive a reconstructible encryption identity). |
 | `sxBox(pMessage, pRecipientPk, pSenderSk)` | `Data` | Authenticated encryption from sender to recipient (random nonce prepended). |
 | `sxBoxOpen(pBox, pSenderPk, pRecipientSk)` | `Data` | Open; throws on wrong key / tamper. |
 | `sxSeal(pMessage, pRecipientPk)` | `Data` | Anonymous-sender sealed box (sender needs only the recipient's public key). |
@@ -167,6 +169,7 @@ server's tx and vice versa. rx is for receiving, tx for sending.
 | Handler | Returns | Notes |
 |---|---|---|
 | `sxKeyExchangeKeypair(out rPublicKey, out rSecretKey)` | command | An X25519 kx keypair. |
+| `sxKeyExchangeKeypairFromSeed(pSeed, out rPublicKey, out rSecretKey)` | command | Deterministic kx keypair from a 32-byte seed. |
 | `sxKeyExchangeClient(pClientPk, pClientSk, pServerPk, out rRx, out rTx)` | command | The client derives its session keys. Throws if the peer key is rejected. |
 | `sxKeyExchangeServer(pServerPk, pServerSk, pClientPk, out rRx, out rTx)` | command | The server derives its session keys. |
 
