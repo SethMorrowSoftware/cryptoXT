@@ -1,0 +1,55 @@
+name: CI
+
+# Starter CI for the OnionXT repo. OnionXT is a script-first layer (livecodescript,
+# with an optional thin LCB/C helper) that speaks SOCKS5 and the Tor control-port
+# protocol to a locally-running tor daemon. It adds no cryptography of its own
+# (SodiumXT does that) and, in its v1 form, ships no native build matrix: the SOCKS5
+# client and control-port client are engine socket I/O. Add a native matrix to this
+# file only if OnionXT ever grows its own C shim (mirror SodiumXT's matrix +
+# sanitizers if so).
+#
+# What runs: the LCB/livecodescript static gate, and a docs house-style check.
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  static-gate:
+    name: LCB static gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: python3 tools/check-livecodescript.py
+
+  docs-style:
+    name: docs house style (ASCII, no em-dashes)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: No em-dashes, en-dashes, or smart quotes in Markdown
+        run: |
+          python3 - << 'PY'
+          import glob, sys
+          banned = {0x2013:'en-dash', 0x2014:'em-dash', 0x2018:'lsquo',
+                    0x2019:'rsquo', 0x201c:'ldquo', 0x201d:'rdquo'}
+          hits = []
+          for f in glob.glob('**/*.md', recursive=True):
+              for n, line in enumerate(open(f, encoding='utf-8'), 1):
+                  for code, name in banned.items():
+                      if chr(code) in line:
+                          hits.append(f"{f}:{n}: {name}")
+          if hits:
+              print("House-style violations (use hyphens, commas, colons, parentheses):")
+              print("\n".join(hits))
+              sys.exit(1)
+          print("docs house style OK")
+          PY
