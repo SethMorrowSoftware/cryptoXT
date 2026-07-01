@@ -10,8 +10,9 @@
 -- these ciphers fail closed.
 --
 -- Tabs: Secret Key (passphrase encryption), Public Key (X25519 box + sealed
--- box), Signatures (ed25519), Hash & Files (BLAKE2b + C-side file ops), About
--- (the pitch + a one-click self-test).
+-- box), Signatures (ed25519), Hash/Files (BLAKE2b + C-side file ops), Identity
+-- (deterministic keypairs from a passphrase), Rekey (in-session forward
+-- secrecy), About (the pitch + a one-click self-test).
 --
 -- To use (requires the SodiumXT extension installed so org.openxtalk.library
 -- .sodium is loaded): open as a script-only stack, OR paste this as a stack's
@@ -194,11 +195,13 @@ on buildUI
    end try
 
    -- Tab bar.
-   makeButton "ui:tabEncrypt", "24,76,173,104", "Secret Key", false
-   makeButton "ui:tabKeys", "179,76,328,104", "Public Key", false
-   makeButton "ui:tabSign", "334,76,483,104", "Signatures", false
-   makeButton "ui:tabHash", "489,76,638,104", "Hash & Files", false
-   makeButton "ui:tabAbout", "644,76,793,104", "About", false
+   makeButton "ui:tabEncrypt", "24,76,128,104", "Secret Key", false
+   makeButton "ui:tabKeys", "134,76,238,104", "Public Key", false
+   makeButton "ui:tabSign", "244,76,348,104", "Signatures", false
+   makeButton "ui:tabHash", "354,76,458,104", "Hash/Files", false
+   makeButton "ui:tabSeed", "464,76,568,104", "Identity", false
+   makeButton "ui:tabRoll", "574,76,678,104", "Rekey", false
+   makeButton "ui:tabAbout", "684,76,788,104", "About", false
 
    -- Content panel + footer.
    makeRect "ui:panel", "24,112,796,604", "panelBg", 10
@@ -208,6 +211,8 @@ on buildUI
    buildKeyTab
    buildSignTab
    buildHashTab
+   buildSeedTab
+   buildRollTab
    buildAboutTab
 end buildUI
 
@@ -270,6 +275,29 @@ on buildHashTab
    makeLabel "hash:status", "48,556,748,596", "Hash text above, or use a passphrase to encrypt or decrypt a file (you choose where to save).", "muted", 12, "plain"
 end buildHashTab
 
+on buildSeedTab
+   makeLabel "seed:h", "48,126,748,154", "Deterministic keypairs from a passphrase", "ink", 16, "bold"
+   makeLabel "seed:exp", "48,158,748,242", "A random keypair must be backed up or it is lost forever. Instead, let your passphrase BE your identity: Argon2id turns it into a 32-byte seed, and the seed derives the keypair. The same passphrase (with the same salt) always rebuilds the EXACT same keys - so there is nothing to store, and you become yourself again on any device just by typing it. One extra character is a wholly different identity.", "muted", 12, "plain"
+   makeLabel "seed:lp", "48,250,300,272", "Passphrase", "ink", 12, "bold"
+   makeInput "seed:pass", "48,274,430,302", "correct horse battery staple"
+   makeButton "seed:derive", "48,314,300,346", "Derive my identity", true
+   makeLabel "seed:lo", "48,356,748,376", "Derived public keys (hex) and the proof they are reproducible", "muted", 11, "plain"
+   makeMono "seed:out", "48,378,748,540"
+   makeLabel "seed:status", "48,556,748,596", "Type a passphrase and click Derive my identity. Derive again to see identical keys; change one character for a new identity.", "muted", 12, "plain"
+end buildSeedTab
+
+on buildRollTab
+   makeLabel "roll:h", "48,126,748,154", "Forward secrecy: rekeying a live stream", "ink", 16, "bold"
+   makeLabel "roll:exp", "48,158,748,242", "A streaming session (secretstream) can rekey in mid-flight. After a rekey the previous key is gone: anyone who copied the key at the start can no longer read what is sent AFTER the rekey. Type two lines - one before the rekey, one after - then run the demo. The up-to-date receiver reads both; a receiver still holding the old key reads only the first, and the post-rekey line is rejected.", "muted", 12, "plain"
+   makeLabel "roll:l1", "48,250,400,270", "Message sent BEFORE the rekey", "ink", 12, "bold"
+   makeInput "roll:before", "48,272,748,300", "Ready on channel one."
+   makeLabel "roll:l2", "48,308,400,328", "Message sent AFTER the rekey", "ink", 12, "bold"
+   makeInput "roll:after", "48,330,748,358", "Rotating keys now - any earlier capture is useless."
+   makeButton "roll:run", "48,370,320,402", "Run the forward-secrecy demo", true
+   makeMono "roll:out", "48,414,748,540"
+   makeLabel "roll:status", "48,556,748,596", "Type two messages, then run the demo to watch a rekey lock the old key out of everything that follows.", "muted", 12, "plain"
+end buildRollTab
+
 on buildAboutTab
    makeLabel "about:h", "48,126,748,154", "SodiumXT", "ink", 16, "bold"
    makeLabel "about:exp", "48,158,748,300", "SodiumXT brings modern, audited cryptography to OpenXTalk and the xTalk family through one library: authenticated encryption (secretbox and AEAD), Argon2id password hashing, a streaming cipher for large files, X25519 public-key boxes and sealed boxes, ed25519 signatures, BLAKE2b hashing, key derivation and key exchange, and a real CSPRNG. It wraps libsodium behind a flat C ABI with a thin LiveCode Builder layer, so any xTalk app can drop its hand-rolled crypto and just call sx*. Every cipher here authenticates: tampering and wrong keys fail closed.", "muted", 12, "plain"
@@ -292,7 +320,7 @@ on showTab pKey
    repeat with tI = 1 to the number of controls of this card
       put the short name of control tI into tN
       put item 1 of tN into tPre
-      if tPre is "enc" or tPre is "key" or tPre is "sign" or tPre is "hash" or tPre is "about" then
+      if tPre is "enc" or tPre is "key" or tPre is "sign" or tPre is "hash" or tPre is "seed" or tPre is "roll" or tPre is "about" then
          set the visible of control tI to (tPre is pKey)
       end if
    end repeat
@@ -304,6 +332,8 @@ on restyleTabs
    styleTab "ui:tabKeys", (sTab is "key")
    styleTab "ui:tabSign", (sTab is "sign")
    styleTab "ui:tabHash", (sTab is "hash")
+   styleTab "ui:tabSeed", (sTab is "seed")
+   styleTab "ui:tabRoll", (sTab is "roll")
    styleTab "ui:tabAbout", (sTab is "about")
 end restyleTabs
 
@@ -339,6 +369,10 @@ on mouseUp
       handleSign tRole
    else if tPrefix is "hash" then
       handleHash tRole
+   else if tPrefix is "seed" then
+      handleSeed tRole
+   else if tPrefix is "roll" then
+      handleRoll tRole
    else if tPrefix is "about" then
       handleAbout tRole
    end if
@@ -353,6 +387,10 @@ on handleChrome pRole
       showTab "sign"
    else if pRole is "tabHash" then
       showTab "hash"
+   else if pRole is "tabSeed" then
+      showTab "seed"
+   else if pRole is "tabRoll" then
+      showTab "roll"
    else if pRole is "tabAbout" then
       showTab "about"
    end if
@@ -675,6 +713,130 @@ on doDecFile
 end doDecFile
 
 -- ==========================================================================
+-- Identity tab: a passphrase deterministically rebuilds the SAME keypair.
+-- Argon2id(passphrase, fixed salt) -> 32-byte seed -> sxBoxKeypairFromSeed /
+-- sxKeyExchangeKeypairFromSeed. The same passphrase always yields the same
+-- keys, so there is nothing to back up; a different passphrase is a wholly
+-- different identity. (A login system would store a per-user salt; here we
+-- WANT the same passphrase to rebuild the identity, so the salt is fixed.)
+-- ==========================================================================
+
+on handleSeed pRole
+   if pRole is "derive" then
+      doSeedDerive
+   end if
+end handleSeed
+
+on doSeedDerive
+   local tSalt
+   local tSeed
+   local tSeed2
+   local tBoxPk
+   local tBoxSk
+   local tBoxPk2
+   local tBoxSk2
+   local tKxPk
+   local tKxSk
+   local tTypoPk
+   local tTypoSk
+   local tSealed
+   local tReport
+   if field "seed:pass" is empty then
+      setStatus "seed:status", "Enter a passphrase first.", "bad"
+      exit doSeedDerive
+   end if
+   -- A FIXED 16-byte salt makes the derivation reproducible on purpose: the
+   -- same passphrase must reach the same seed. crypto_pwhash needs 16 salt bytes.
+   put textEncode("SodiumXT-Demo-16", "utf-8") into tSalt
+   put sxPwHash(textEncode(field "seed:pass", "utf-8"), tSalt, 32, "2", sxPwMemInteractive()) into tSeed
+   sxBoxKeypairFromSeed tSeed, tBoxPk, tBoxSk
+   sxKeyExchangeKeypairFromSeed tSeed, tKxPk, tKxSk
+   -- The NEW capability: a seed deterministically fixes the keypair. Derive it
+   -- a second time from the same seed and compare the public keys constant-time.
+   sxBoxKeypairFromSeed tSeed, tBoxPk2, tBoxSk2
+   -- One extra character in the passphrase is a completely different identity.
+   put sxPwHash(textEncode(field "seed:pass" & "!", "utf-8"), tSalt, 32, "2", sxPwMemInteractive()) into tSeed2
+   sxBoxKeypairFromSeed tSeed2, tTypoPk, tTypoSk
+   put "box public key:  " & shortHex(tBoxPk, 48) & return into tReport
+   put "kx  public key:  " & shortHex(tKxPk, 48) & return & return after tReport
+   if sxMemEqual(tBoxPk, tBoxPk2) then
+      put "same seed -> keypair: IDENTICAL (verified constant-time)" & return after tReport
+   else
+      put "same seed -> keypair: DIFFERENT (unexpected!)" & return after tReport
+   end if
+   put "one extra character -> " & shortHex(tTypoPk, 24) & "... (a different identity)" & return & return after tReport
+   -- Prove it is a genuine, usable keypair: seal a note to it and open it back.
+   put sxSeal(textEncode("hello, future me", "utf-8"), tBoxPk) into tSealed
+   try
+      put "real keypair: sealed a note to it and reopened it, got: " & textDecode(sxSealOpen(tSealed, tBoxPk, tBoxSk), "utf-8") after tReport
+   catch tErr
+      put "real keypair: FAILED to open the sealed note (unexpected)" after tReport
+   end try
+   put tReport into field "seed:out"
+   setStatus "seed:status", "Your passphrase deterministically rebuilt the SAME keypair - nothing to store. Retype it anywhere to be you again; change a character for a new identity.", "ok"
+end doSeedDerive
+
+-- ==========================================================================
+-- Rekey tab: secretstream rekey gives in-session forward secrecy. Two
+-- receivers start from one shared key; after a rekey, only the receiver that
+-- rekeyed too can read on. The other (standing in for a key captured at the
+-- start of the session) is locked out of everything sent after the rekey.
+-- ==========================================================================
+
+on handleRoll pRole
+   if pRole is "run" then
+      doRollDemo
+   end if
+end handleRoll
+
+on doRollDemo
+   local tKey
+   local tHeader
+   local tNoAd
+   local tSender
+   local tRecv
+   local tStale
+   local tTag
+   local tCtA
+   local tCtB
+   local tReport
+   put sxRandomBytes(32) into tKey
+   put textEncode("", "utf-8") into tNoAd
+   -- One shared session key and header. tRecv is the up-to-date partner; tStale
+   -- copied the SAME key at the start and never rekeys (our stand-in attacker).
+   put sxSecretStreamInitPush(tKey, tHeader) into tSender
+   put sxSecretStreamInitPull(tKey, tHeader) into tRecv
+   put sxSecretStreamInitPull(tKey, tHeader) into tStale
+   put "one session key shared; two receivers start from it" & return & return into tReport
+   -- Chunk one, before any rekey: both receivers can read it.
+   put sxSecretStreamPush(tSender, textEncode(field "roll:before", "utf-8"), tNoAd, false) into tCtA
+   put "-- before the rekey --" & return after tReport
+   put "  sent:       " & field "roll:before" & return after tReport
+   put "  current rx: " & textDecode(sxSecretStreamPull(tRecv, tCtA, tNoAd, tTag), "utf-8") & return after tReport
+   put "  stale rx:   " & textDecode(sxSecretStreamPull(tStale, tCtA, tNoAd, tTag), "utf-8") & return & return after tReport
+   -- Rekey the sender and the current receiver together; the stale one does not.
+   sxSecretStreamRekey tSender
+   sxSecretStreamRekey tRecv
+   put "** sender and current receiver rekey; the stale key is left behind **" & return & return after tReport
+   -- Chunk two, after the rekey.
+   put sxSecretStreamPush(tSender, textEncode(field "roll:after", "utf-8"), tNoAd, true) into tCtB
+   put "-- after the rekey --" & return after tReport
+   put "  sent:       " & field "roll:after" & return after tReport
+   put "  current rx: " & textDecode(sxSecretStreamPull(tRecv, tCtB, tNoAd, tTag), "utf-8") & return after tReport
+   put "  stale rx:   " after tReport
+   try
+      put textDecode(sxSecretStreamPull(tStale, tCtB, tNoAd, tTag), "utf-8") & " (unexpected - should have failed)" & return after tReport
+   catch tErr
+      put "REJECTED - the old key cannot read past a rekey (forward secrecy)" & return after tReport
+   end try
+   sxFreeStream tSender
+   sxFreeStream tRecv
+   sxFreeStream tStale
+   put tReport into field "roll:out"
+   setStatus "roll:status", "The current receiver read both messages; the stale-key receiver read only the first. A rekey locks the old key out of everything that follows.", "ok"
+end doRollDemo
+
+-- ==========================================================================
 -- About tab: a compact self-test against the live library.
 -- ==========================================================================
 
@@ -692,6 +854,14 @@ on doSelfTest
    local tSig
    local tR
    local tInRange
+   local tNoAd
+   local tHdr
+   local tPushH
+   local tPullH
+   local tCa
+   local tCb
+   local tTag
+   local tRkOk
    put 0 into sTPass
    put 0 into sTFail
    put "Running checks against" && sxVersion() & return & return into sTLog
@@ -723,6 +893,36 @@ on doSelfTest
       end if
    end repeat
    checkInto tInRange, "uniform random stays in [0, 2) over 256 draws"
+
+   -- seeded keypairs are deterministic: one seed always fixes the same keypair
+   put sxRandomBytes(32) into tKey
+   sxBoxKeypairFromSeed tKey, tPk, tSk
+   sxBoxKeypairFromSeed tKey, tR, tBox
+   checkInto (sxMemEqual(tPk, tR)), "seeded keypair is deterministic (same seed, same key)"
+
+   -- secretstream rekey: a matched rekey keeps sync; an unmatched one must fail
+   put sxRandomBytes(32) into tKey
+   put textEncode("", "utf-8") into tNoAd
+   put sxSecretStreamInitPush(tKey, tHdr) into tPushH
+   put sxSecretStreamPush(tPushH, textEncode("before", "utf-8"), tNoAd, false) into tCa
+   sxSecretStreamRekey tPushH
+   put sxSecretStreamPush(tPushH, textEncode("after", "utf-8"), tNoAd, true) into tCb
+   sxFreeStream tPushH
+   put sxSecretStreamInitPull(tKey, tHdr) into tPullH
+   get sxSecretStreamPull(tPullH, tCa, tNoAd, tTag)
+   sxSecretStreamRekey tPullH
+   checkInto (textDecode(sxSecretStreamPull(tPullH, tCb, tNoAd, tTag), "utf-8") is "after"), "secretstream stays in sync when both ends rekey"
+   sxFreeStream tPullH
+   put false into tRkOk
+   put sxSecretStreamInitPull(tKey, tHdr) into tPullH
+   get sxSecretStreamPull(tPullH, tCa, tNoAd, tTag)
+   try
+      get sxSecretStreamPull(tPullH, tCb, tNoAd, tTag)
+   catch tErr
+      put true into tRkOk
+   end try
+   sxFreeStream tPullH
+   checkInto tRkOk, "an unmatched rekey locks the old key out of later chunks"
 
    put return & (sTPass + sTFail) & " checks run." after sTLog
    put sTLog into field "about:out"
