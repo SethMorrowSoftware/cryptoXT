@@ -2245,3 +2245,84 @@ SXT_API int SXT_CALL sxt_hash_file(const char *path, unsigned char *out, int cap
     crypto_generichash_final(&st, out, (size_t)outlen);
     return outlen;
 }
+
+/* --- ABI 6: primitives for onion-service support (OnionXT) ---------------- */
+
+SXT_API int SXT_CALL sxt_sign_expandedkeybytes(void) { return (int)crypto_hash_sha512_BYTES; }
+
+SXT_API int SXT_CALL sxt_sign_seed_to_expanded_key(unsigned char *out, int cap,
+                                                   const unsigned char *seed, int seedlen)
+{
+    unsigned char h[crypto_hash_sha512_BYTES];   /* == the 64-byte expanded key after the clamp */
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (seedlen != (int)crypto_sign_SEEDBYTES) {
+        set_error("sxt_sign_seed_to_expanded_key: wrong seed length");
+        return SXT_ERR_BADARG;
+    }
+    if (cap < (int)crypto_hash_sha512_BYTES) {
+        return -(int)crypto_hash_sha512_BYTES;
+    }
+    if (out == NULL || seed == NULL) {
+        set_error("sxt_sign_seed_to_expanded_key: null buffer");
+        return SXT_ERR_BADARG;
+    }
+    /* The ed25519 private scalar a and nonce prefix RH are SHA-512(seed) split in
+     * half, with the low half clamped onto the curve. This (a || RH) is exactly
+     * what a Tor v3 onion service stores as its expanded secret key; we add no
+     * crypto of our own, only crypto_hash_sha512 plus the standard clamp. */
+    crypto_hash_sha512(h, seed, (unsigned long long)crypto_sign_SEEDBYTES);
+    h[0]  &= 248;
+    h[31] &= 127;
+    h[31] |= 64;
+    memcpy(out, h, sizeof h);
+    sodium_memzero(h, sizeof h);
+    return (int)crypto_hash_sha512_BYTES;
+}
+
+SXT_API int SXT_CALL sxt_hmac_sha256_bytes(void) { return (int)crypto_auth_hmacsha256_BYTES; }
+
+SXT_API int SXT_CALL sxt_hmac_sha256(unsigned char *out, int cap,
+                                     const unsigned char *key, int keylen,
+                                     const unsigned char *msg, int msglen)
+{
+    crypto_auth_hmacsha256_state st;
+    const int outbytes = (int)crypto_auth_hmacsha256_BYTES;
+
+    clear_error();
+    if (ensure_init() != SXT_OK) {
+        return SXT_ERR_INIT;
+    }
+    if (keylen < 0 || msglen < 0) {
+        set_error("sxt_hmac_sha256: negative length");
+        return SXT_ERR_BADARG;
+    }
+    if (cap < outbytes) {
+        return -outbytes;
+    }
+    if (out == NULL) {
+        set_error("sxt_hmac_sha256: null output buffer");
+        return SXT_ERR_BADARG;
+    }
+    if (keylen > 0 && key == NULL) {
+        set_error("sxt_hmac_sha256: null key");
+        return SXT_ERR_BADARG;
+    }
+    if (msglen > 0 && msg == NULL) {
+        set_error("sxt_hmac_sha256: null message");
+        return SXT_ERR_BADARG;
+    }
+    /* Multipart init takes an arbitrary key length; the one-shot form would fix
+     * the key at 32 bytes. Pass a valid non-NULL pointer even when a length is 0
+     * (an empty key/message is legal) so we never hand libsodium (NULL, 0). */
+    crypto_auth_hmacsha256_init(&st, (keylen > 0 ? key : (const unsigned char *)""),
+                                (size_t)keylen);
+    crypto_auth_hmacsha256_update(&st, (msglen > 0 ? msg : (const unsigned char *)""),
+                                  (unsigned long long)msglen);
+    crypto_auth_hmacsha256_final(&st, out);
+    sodium_memzero(&st, sizeof st);
+    return outbytes;
+}

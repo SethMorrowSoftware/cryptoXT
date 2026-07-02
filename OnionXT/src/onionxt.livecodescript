@@ -131,10 +131,10 @@ command oxCreateService pVirtualPort, pLocalPort
 end oxCreateService
 
 command oxCreateServiceFromSeed pSeed, pVirtualPort, pLocalPort
-   -- TODO(phase 5): derive the ed25519 identity from pSeed via SodiumXT
-   -- (sxSignKeypairFromSeed), expand it to Tor's 64-byte ED25519-V3 form
-   -- (needs the SodiumXT SHA-512 / expansion helper, docs/08), and pass it to
-   -- ADD_ONION ED25519-V3:<key> so the .onion address is reproducible.
+   -- TODO(phase 5): derive the ed25519 identity from pSeed via SodiumXT and get
+   -- Tor's 64-byte ED25519-V3 expanded key with sxSignSeedToExpandedKey (shipped
+   -- in SodiumXT ABI 6), then pass it to ADD_ONION ED25519-V3:<key> so the .onion
+   -- address is reproducible from the seed.
    return notImplemented("oxCreateServiceFromSeed")
 end oxCreateServiceFromSeed
 

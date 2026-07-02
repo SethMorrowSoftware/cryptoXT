@@ -75,8 +75,9 @@ Send exactly one of these, matching the chosen method:
   hash).
 
 Expect `250 OK`. `515` means the credential was wrong; `514` means you skipped auth. Note: SAFECOOKIE
-needs HMAC-SHA256, which is a SodiumXT capability gap today (doc 08); until it lands, COOKIE auth
-(plain hex over loopback) is the pragmatic path, and NULL/HASHEDPASSWORD need no HMAC.
+needs HMAC-SHA256, now **shipped in SodiumXT ABI 6** as `sxHmacSha256` (doc 08), so SAFECOOKIE can be
+implemented directly; COOKIE auth (plain hex over loopback) remains a fine fallback, and
+NULL/HASHEDPASSWORD need no HMAC.
 
 ## Step 3: publish an onion service (ADD_ONION)
 

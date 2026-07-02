@@ -48,7 +48,7 @@ not know the app's framing).
 | Handler | Kind | Purpose |
 |---|---|---|
 | `oxCreateService pVirtualPort, pLocalPort` | command | `ADD_ONION NEW:ED25519-V3` mapping `pVirtualPort` -> `127.0.0.1:pLocalPort`, after ensuring a loopback listener is accepting on `pLocalPort`. Reports the full `<56>.onion` address and a service handle. |
-| `oxCreateServiceFromSeed pSeed, pVirtualPort, pLocalPort` | command | As above, but deterministic: derive the ed25519 key from `pSeed` via SodiumXT and pass the expanded key (needs the doc 08 helper), so the address is reproducible. |
+| `oxCreateServiceFromSeed pSeed, pVirtualPort, pLocalPort` | command | As above, but deterministic: derive the ed25519 key from `pSeed` via SodiumXT and pass the expanded key (`sxSignSeedToExpandedKey`, shipped in SodiumXT ABI 6), so the address is reproducible. |
 | `oxRemoveService pService` | command | `DEL_ONION` and stop the listener. Idempotent. |
 | `oxServiceAddress pService` | function | The `.onion` address of a published service. |
 | `oxSetPeerCallback pHandlerName` | command | Register the handler called when a peer connects to a published service (delivers a new inbound stream handle). |

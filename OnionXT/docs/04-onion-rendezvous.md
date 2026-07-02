@@ -67,12 +67,12 @@ get it right:
 1. **Let Tor generate the key** (`NEW:ED25519-V3`) and persist the returned `PrivateKey`. Simplest;
    the address is then random, not seed-derived. Fine when reproducibility is not required.
 2. **Compute the expansion yourself.** You need SHA-512 (to hash the seed) and then the clamping above.
-   SodiumXT does not currently expose SHA-512 or an "ed25519 expanded key from seed" helper, so this is
-   a capability gap (doc 08). The clean fix is a tiny SodiumXT addition, `sxSignSeedToExpandedKey` (or
-   exposing `crypto_hash_sha512` plus doing the clamp in script), landed upstream first.
+   This is now **shipped in SodiumXT ABI 6** as `sxSignSeedToExpandedKey(pSeed)`, which returns the
+   64-byte expanded key (SHA-512 + clamp) directly, verified against an independent known-answer vector.
+   `oxCreateServiceFromSeed` composes it; there is no longer a gap here (doc 08).
 
-Do not hand-roll SHA-512 in script to dodge the gap; that violates "compose SodiumXT, add no crypto"
-(CLAUDE.md rule 1). Land the upstream helper.
+Do not hand-roll SHA-512 in script; that violates "compose SodiumXT, add no crypto" (CLAUDE.md rule 1).
+Compose the shipped `sxSignSeedToExpandedKey` helper instead.
 
 ## The checksum and base32
 

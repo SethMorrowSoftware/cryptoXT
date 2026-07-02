@@ -6,6 +6,10 @@ with the OnionXT feature it blocks, options, and a recommendation. The family ru
 crypto primitive is an **upstream SodiumXT feature request landed first**, never a hand-rolled hash in
 OnionXT.
 
+**Status:** gaps #1 (ed25519 seed to expanded key) and #3 (HMAC-SHA256) are now **shipped in SodiumXT
+ABI 6** as `sxSignSeedToExpandedKey` and `sxHmacSha256`. Only gap #2 (SHA3-256) remains open, and it is
+deferrable (see its entry).
+
 ## SodiumXT gaps
 
 ### 1. ed25519 seed -> expanded key (for deterministic onion services)
@@ -23,6 +27,9 @@ OnionXT.
      No reproducible-from-seed address, but no upstream dependency.
 - **Recommendation:** land (a) upstream in SodiumXT (small, well-scoped, testable with a known-answer
   vector), then compose it. Until then, ship deferral (c) so the rest of OnionXT is unblocked.
+- **STATUS: SHIPPED (SodiumXT ABI 6).** Landed as `sxSignSeedToExpandedKey(pSeed) returns Data` (the
+  64-byte expanded key = `SHA-512(seed)` with the ed25519 scalar clamp), verified against an
+  independent known-answer vector. `oxCreateServiceFromSeed` composes it; no deferral needed.
 
 ### 2. SHA3-256 (for the v3 onion address checksum)
 
@@ -39,6 +46,10 @@ OnionXT.
 - **Recommendation:** defer (b) for v1; the checksum is a nicety, not a security dependency (the
   descriptor signature is the real authentication). Add (a) only if offline address emission/validation
   becomes a real need.
+- **STATUS: DEFERRED (the only remaining gap).** libsodium has no SHA-3, so this is the one primitive
+  that would mean bundling non-libsodium crypto into SodiumXT; it stays deferred until offline `.onion`
+  emit/validate is genuinely needed. Address recovery (base32 decode -> ed25519 public key) and
+  connect-time authentication both work without it.
 
 ### 3. HMAC-SHA256 (for SAFECOOKIE control auth)
 
@@ -51,6 +62,10 @@ OnionXT.
      Over a loopback control port this is acceptable.
 - **Recommendation:** defer (b) for v1 (COOKIE over loopback is fine), and add (a) upstream when
   hardening, since SAFECOOKIE avoids sending the cookie in the clear even on loopback.
+- **STATUS: SHIPPED (SodiumXT ABI 6).** Landed as `sxHmacSha256(pKey, pMessage) returns Data`
+  (crypto_auth_hmacsha256, multipart form so the key may be any length), verified against RFC 4231
+  Test Case 2. SAFECOOKIE control auth can now be implemented directly; COOKIE auth remains a fine
+  fallback.
 
 ## Engine capabilities to confirm (not gaps, but Phase 0 unknowns)
 

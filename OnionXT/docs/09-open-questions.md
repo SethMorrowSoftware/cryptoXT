@@ -40,10 +40,12 @@ docs and code in the same change that closes them.
 
 ## Upstream dependencies (tracked in doc 08)
 
-9. **SodiumXT SHA-512 / ed25519 expansion** for deterministic onions. Blocks `oxCreateServiceFromSeed`
-   until landed; deferral (Tor-generated keys) unblocks the rest.
-10. **SodiumXT SHA3-256** for offline address checksum, and **HMAC-SHA256** for SAFECOOKIE auth. Both
-    deferrable for v1; add when hardening.
+9. **SodiumXT ed25519 seed-to-expanded-key** for deterministic onions: **SHIPPED** (ABI 6,
+   `sxSignSeedToExpandedKey`). `oxCreateServiceFromSeed` can compose it directly; no longer a blocker.
+10. **SodiumXT HMAC-SHA256** for SAFECOOKIE auth: **SHIPPED** (ABI 6, `sxHmacSha256`). **SodiumXT
+    SHA3-256** for the offline address checksum remains **DEFERRED** (the only open upstream item;
+    libsodium has no SHA-3, so it would mean bundling non-libsodium crypto). Add it only when offline
+    `.onion` emit/validate is genuinely needed.
 
 ## Testing and conformance
 
