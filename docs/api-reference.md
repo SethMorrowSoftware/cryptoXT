@@ -59,6 +59,7 @@ BLAKE2b. The default digest length is 32 bytes; the valid range is 16..64.
 | `sxBin2Base64(pData)` | `Data` | URL-safe base64, no padding (ASCII bytes). |
 | `sxBase642Bin(pB64)` | `Data` | Decode URL-safe base64 back to bytes; throws on malformed input. |
 | `sxMemEqual(pA, pB)` | `Boolean` | Constant-time equality. The only sanctioned way to compare a MAC, tag, hash, or any secret. |
+| `sxHmacSha256(pKey, pMessage)` | `Data` | HMAC-SHA256 (32 bytes) over an arbitrary-length key and message. A standard keyed MAC (e.g. for the Tor control-port SAFECOOKIE challenge-response). Compare a resulting MAC with `sxMemEqual`, never `is`. |
 
 ### Multipart hash (data assembled incrementally)
 
@@ -156,6 +157,7 @@ deterministic unload hook.
 |---|---|---|
 | `sxSignKeypair(out rPublicKey, out rSecretKey)` | command | Random ed25519 keypair. |
 | `sxSignKeypairFromSeed(pSeed, out rPublicKey, out rSecretKey)` | command | Deterministic keypair from a 32-byte seed (BEP44-compatible). |
+| `sxSignSeedToExpandedKey(pSeed)` | `Data` | The 64-byte EXPANDED ed25519 secret key from a 32-byte seed (`SHA-512(seed)`, clamped). This is not the `sxSignKeypairFromSeed` secret key (seed + public key); it is the separate `a \|\| RH` form a Tor v3 onion service consumes, so one seed can fix a reproducible `.onion` address. |
 | `sxSignDetached(pMessage, pSecretKey)` | `Data` | A detached signature (verify alongside the message). |
 | `sxSignVerifyDetached(pSig, pMessage, pPublicKey)` | `Boolean` | True if the signature is valid (never throws; a bad signature is `false`). |
 | `sxSign(pMessage, pSecretKey)` | `Data` | Attached signature (signature + message in one blob). |

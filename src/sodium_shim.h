@@ -13,8 +13,9 @@
  * multipart, and whole-file) + hex/base64 + constant-time compare; secretbox
  * and AEAD; Argon2id (pwhash / pwhash_str) and the KDF; streaming AEAD
  * (secretstream) and the C-side file helpers; X25519 boxes and sealed boxes;
- * ed25519 signatures; key exchange; and padding. The ABI is versioned by
- * SXT_ABI_VERSION below; bump it on any signature change.
+ * ed25519 signatures; key exchange; padding; and (ABI 6) an ed25519
+ * seed-to-expanded-key helper and HMAC-SHA256 for onion-service support. The
+ * ABI is versioned by SXT_ABI_VERSION below; bump it on any signature change.
  */
 #ifndef SODIUMXT_SODIUM_SHIM_H
 #define SODIUMXT_SODIUM_SHIM_H
@@ -44,7 +45,7 @@ extern "C" {
  * clear "reinstall the extension" error on skew, instead of corrupting memory
  * on first use against a mismatched native library.
  */
-#define SXT_ABI_VERSION 5
+#define SXT_ABI_VERSION 6
 
 /*
  * The largest single in-memory out-buffer we will service. The return value of
@@ -532,6 +533,39 @@ SXT_API int SXT_CALL sxt_hash_init(const unsigned char *key, int keylen, int out
 SXT_API int SXT_CALL sxt_hash_update(int handle, const unsigned char *in, int inlen);
 SXT_API int SXT_CALL sxt_hash_final(int handle, unsigned char *out, int cap);
 SXT_API void SXT_CALL sxt_hash_free(int handle);
+
+/* --- ABI 6: ed25519 key expansion + HMAC-SHA256 --------------------------- */
+
+/* The width of the expanded ed25519 secret key (64, the SHA-512 output). */
+SXT_API int SXT_CALL sxt_sign_expandedkeybytes(void);
+
+/*
+ * ed25519 seed -> the 64-byte EXPANDED secret key: SHA-512(seed), with the
+ * standard ed25519 scalar clamp on the first 32 bytes (a || RH). This is NOT
+ * libsodium's "secret key" (which is seed || pk); it is the form a Tor v3 onion
+ * service wants for ADD_ONION ED25519-V3, so a single master seed can fix a
+ * reproducible .onion address. Adds no new crypto: it is
+ * crypto_hash_sha512 plus the documented clamp. seed must be exactly
+ * sxt_sign_seedbytes(); writes sxt_sign_expandedkeybytes() bytes and returns
+ * that count, or -needed / a hard error.
+ */
+SXT_API int SXT_CALL sxt_sign_seed_to_expanded_key(unsigned char *out, int cap,
+                                                   const unsigned char *seed, int seedlen);
+
+/* HMAC-SHA256 output length (32). */
+SXT_API int SXT_CALL sxt_hmac_sha256_bytes(void);
+
+/*
+ * HMAC-SHA256 (crypto_auth_hmacsha256) over an ARBITRARY-length key and message.
+ * The multipart init form is used deliberately: the one-shot crypto_auth_hmacsha256
+ * fixes the key at 32 bytes, but callers such as the Tor control-port SAFECOOKIE
+ * challenge-response key the MAC with fixed constant strings of other lengths.
+ * key may be empty (keylen 0) and msg may be empty (msglen 0). Writes
+ * sxt_hmac_sha256_bytes() bytes, returns that count, -needed, or a hard error.
+ */
+SXT_API int SXT_CALL sxt_hmac_sha256(unsigned char *out, int cap,
+                                     const unsigned char *key, int keylen,
+                                     const unsigned char *msg, int msglen);
 
 #ifdef __cplusplus
 }
