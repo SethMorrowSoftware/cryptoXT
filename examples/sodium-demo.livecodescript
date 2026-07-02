@@ -300,7 +300,7 @@ end buildRollTab
 
 on buildAboutTab
    makeLabel "about:h", "48,126,748,154", "SodiumXT", "ink", 16, "bold"
-   makeLabel "about:exp", "48,158,748,300", "SodiumXT brings modern, audited cryptography to OpenXTalk and the xTalk family through one library: authenticated encryption (secretbox and AEAD), Argon2id password hashing, a streaming cipher for large files, X25519 public-key boxes and sealed boxes, ed25519 signatures, BLAKE2b hashing, key derivation and key exchange, and a real CSPRNG. It wraps libsodium behind a flat C ABI with a thin LiveCode Builder layer, so any xTalk app can drop its hand-rolled crypto and just call sx*. Every cipher here authenticates: tampering and wrong keys fail closed.", "muted", 12, "plain"
+   makeLabel "about:exp", "48,158,748,300", "SodiumXT brings modern, audited cryptography to OpenXTalk and the xTalk family through one library: authenticated encryption (secretbox and AEAD), Argon2id password hashing, a streaming cipher for large files, X25519 public-key boxes and sealed boxes, ed25519 signatures, BLAKE2b and HMAC-SHA256 hashing, key derivation and key exchange, and a real CSPRNG. It wraps libsodium behind a flat C ABI with a thin LiveCode Builder layer, so any xTalk app can drop its hand-rolled crypto and just call sx*. Every cipher here authenticates: tampering and wrong keys fail closed.", "muted", 12, "plain"
    makeLabel "about:hint", "48,306,748,348", "New here? Open the Secret Key tab, type a passphrase, click Encrypt, then click Flip a byte and Decrypt - watch the tampering get rejected. That rejection is the whole point.", "accent", 12, "bold"
    makeButton "about:selftest", "48,356,300,388", "Run the full self-test", true
    makeMono "about:out", "48,398,748,540"
@@ -923,6 +923,14 @@ on doSelfTest
    end try
    sxFreeStream tPullH
    checkInto tRkOk, "an unmatched rekey locks the old key out of later chunks"
+
+   -- ed25519 seed -> expanded key (a reproducible identity key): known-answer
+   -- vector for the fixed seed 0x42 x 32 (the letter B is 0x42).
+   put textEncode("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", "ascii") into tKey
+   checkInto (textDecode(sxBin2Hex(sxSignSeedToExpandedKey(tKey)), "ascii") is "90e7595fc89e52fdfddce9c6a43d74dbf6047025ee0462d2d172e8b6a2841d6eeda66ce2983f7ff7e47c49615220e78c25c775a040957316b7bafd5985450f90"), "ed25519 seed-to-expanded-key known-answer vector"
+
+   -- HMAC-SHA256 over an arbitrary-length key: RFC 4231 Test Case 2.
+   checkInto (textDecode(sxBin2Hex(sxHmacSha256(textEncode("Jefe", "utf-8"), textEncode("what do ya want for nothing?", "utf-8"))), "ascii") is "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"), "HMAC-SHA256 matches RFC 4231 Test Case 2"
 
    put return & (sTPass + sTFail) & " checks run." after sTLog
    put sTLog into field "about:out"
