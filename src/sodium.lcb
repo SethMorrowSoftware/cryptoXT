@@ -33,8 +33,8 @@
 --     parameter (e.g. the unkeyed-hash key); a plain Pointer rejects `nothing`;
 --   * out parameters are passed by reference: command form `sxBoxKeypair tPk, tSk`,
 --     or inside a function call `put sxSecretStreamInitPush(tKey, tHeader) into h`.
--- The native C layer is independently tested (KATs + ASan/UBSan, 189 checks);
--- the current C ABI is SXT_ABI_VERSION 5 (kSXTABIVersion below must match).
+-- The native C layer is independently tested (KATs + ASan/UBSan);
+-- the current C ABI is SXT_ABI_VERSION 6 (kSXTABIVersion below must match).
 -- ==========================================================================
 
 library org.openxtalk.library.sodium
@@ -52,7 +52,7 @@ metadata summary    is "Modern cryptography for xTalk via libsodium (authenticat
 --   kSXTABIVersion == SXT_ABI_VERSION ; kSXTErrBase == SXT_ERR_BASE.
 -- Declared before first use (OXT resolves a constant by lexical position; a
 -- forward reference silently evaluates to nothing).
-constant kSXTABIVersion is 5
+constant kSXTABIVersion is 6
 constant kSXTErrBase is -2000000000
 
 -- The engine MCStringEncoding enum value for UTF-8 (libfoundation: ASCII=0,
@@ -182,6 +182,14 @@ foreign handler _sxt_hash_init(in pKey as optional Pointer, in pKeyLen as CInt, 
 foreign handler _sxt_hash_update(in pHandle as CInt, in pIn as Pointer, in pInLen as CInt) returns CInt binds to "c:sodiumxt>sxt_hash_update"
 foreign handler _sxt_hash_final(in pHandle as CInt, in pOut as Pointer, in pCap as CInt) returns CInt binds to "c:sodiumxt>sxt_hash_final"
 foreign handler _sxt_hash_free(in pHandle as CInt) returns nothing binds to "c:sodiumxt>sxt_hash_free"
+
+-- ABI 6: onion-service support primitives. The ed25519 seed-to-expanded-key
+-- helper (for a reproducible Tor v3 .onion address from a master seed) and
+-- HMAC-SHA256 (for the Tor control-port SAFECOOKIE challenge-response).
+foreign handler _sxt_sign_expandedkeybytes() returns CInt binds to "c:sodiumxt>sxt_sign_expandedkeybytes"
+foreign handler _sxt_sign_seed_to_expanded_key(in pOut as Pointer, in pCap as CInt, in pSeed as Pointer, in pSeedLen as CInt) returns CInt binds to "c:sodiumxt>sxt_sign_seed_to_expanded_key"
+foreign handler _sxt_hmac_sha256_bytes() returns CInt binds to "c:sodiumxt>sxt_hmac_sha256_bytes"
+foreign handler _sxt_hmac_sha256(in pOut as Pointer, in pCap as CInt, in pKey as Pointer, in pKeyLen as CInt, in pMsg as Pointer, in pMsgLen as CInt) returns CInt binds to "c:sodiumxt>sxt_hmac_sha256"
 
 -- --------------------------------------------------------------------------
 -- Private helpers. Each wraps its foreign call(s) in `unsafe`, so the public
@@ -1485,6 +1493,61 @@ public handler sxFreeHash(in pHandle as Integer) returns nothing
    unsafe
       _sxt_hash_free(pHandle)
    end unsafe
+end handler
+
+-- ==========================================================================
+-- ABI 6: onion-service support primitives.
+-- ==========================================================================
+
+-- ed25519 seed -> the 64-byte EXPANDED secret key (SHA-512(seed), clamped): the
+-- (a || RH) form a Tor v3 onion service wants for ADD_ONION ED25519-V3, so one
+-- master seed fixes a reproducible .onion address. This is NOT the libsodium
+-- secret key (seed || public key) returned by sxSignKeypairFromSeed; it is the
+-- separate expanded representation. Adds no new crypto (SHA-512 plus the clamp).
+public handler sxSignSeedToExpandedKey(in pSeed as Data) returns Data
+   variable tOut as Pointer
+   variable tSeedPtr as Pointer
+   variable tSeedLen as Integer
+   variable tBytes as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pSeed) into tSeedLen
+   put sDataPtr(pSeed) into tSeedPtr
+   unsafe
+      put _sxt_sign_expandedkeybytes() into tBytes
+   end unsafe
+   put sAlloc(tBytes) into tOut
+   unsafe
+      put _sxt_sign_seed_to_expanded_key(tOut, tBytes, tSeedPtr, tSeedLen) into tWritten
+   end unsafe
+   return sFinish("sxSignSeedToExpandedKey", tOut, tWritten)
+end handler
+
+-- HMAC-SHA256 over an arbitrary-length key and message (the multipart form, so
+-- the key is not fixed at 32 bytes). The standard keyed MAC used by, for example,
+-- the Tor control-port SAFECOOKIE challenge-response. Compare a resulting MAC
+-- with sxMemEqual (constant time), never with `is`.
+public handler sxHmacSha256(in pKey as Data, in pMessage as Data) returns Data
+   variable tOut as Pointer
+   variable tKeyPtr as Pointer
+   variable tKeyLen as Integer
+   variable tMsgPtr as Pointer
+   variable tMsgLen as Integer
+   variable tBytes as Integer
+   variable tWritten as Integer
+   sPrepare()
+   put sDataLen(pKey) into tKeyLen
+   put sDataPtr(pKey) into tKeyPtr
+   put sDataLen(pMessage) into tMsgLen
+   put sDataPtr(pMessage) into tMsgPtr
+   unsafe
+      put _sxt_hmac_sha256_bytes() into tBytes
+   end unsafe
+   put sAlloc(tBytes) into tOut
+   unsafe
+      put _sxt_hmac_sha256(tOut, tBytes, tKeyPtr, tKeyLen, tMsgPtr, tMsgLen) into tWritten
+   end unsafe
+   return sFinish("sxHmacSha256", tOut, tWritten)
 end handler
 
 end library

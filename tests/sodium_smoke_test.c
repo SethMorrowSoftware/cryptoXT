@@ -882,6 +882,60 @@ static void test_seeded_keypairs(void)
           "kx wrong seed length -> BADARG");
 }
 
+static void test_onion_primitives(void)
+{
+    unsigned char seed[32];
+    unsigned char expanded[64];
+    unsigned char expanded2[64];
+    char hex[2 * 64 + 1];
+    unsigned char mac[32];
+
+    printf("onion-support primitives (ed25519 expanded key + HMAC-SHA256, ABI 6):\n");
+
+    /* ed25519 seed -> expanded secret key: SHA-512(seed) with the ed25519 low-half
+     * scalar clamp. KAT computed independently (Python hashlib) for seed 0x42 x 32,
+     * so it cross-checks the shim's crypto_hash_sha512 + clamp against a separate
+     * SHA-512. This is the (a || RH) form ADD_ONION ED25519-V3 consumes. */
+    memset(seed, 0x42, sizeof seed);
+    CHECK(sxt_sign_expandedkeybytes() == 64, "expanded key width is 64");
+    CHECK(sxt_sign_seed_to_expanded_key(expanded, 64, seed, 32) == 64,
+          "seed -> expanded key writes 64 bytes");
+    sxt_bin2hex(hex, (int)sizeof hex, expanded, 64);
+    CHECK(strcmp(hex,
+            "90e7595fc89e52fdfddce9c6a43d74dbf6047025ee0462d2d172e8b6a2841d6e"
+            "eda66ce2983f7ff7e47c49615220e78c25c775a040957316b7bafd5985450f90") == 0,
+          "expanded key (seed 0x42x32) matches the independent KAT");
+    CHECK((expanded[0] & 7) == 0 && (expanded[31] & 192) == 64,
+          "expanded key carries the ed25519 scalar clamp");
+    CHECK(sxt_sign_seed_to_expanded_key(expanded2, 64, seed, 32) == 64 &&
+          memcmp(expanded, expanded2, 64) == 0, "expanded key is deterministic");
+
+    /* firewall: wrong seed length -> BADARG; short buffer -> -needed (64). */
+    CHECK(sxt_sign_seed_to_expanded_key(expanded, 64, seed, 31) == SXT_ERR_BADARG,
+          "expanded key wrong seed length -> BADARG");
+    CHECK(sxt_sign_seed_to_expanded_key(expanded, 10, seed, 32) == -64,
+          "expanded key short buffer -> -needed (64)");
+
+    /* HMAC-SHA256 over an arbitrary-length key: RFC 4231 Test Case 2 (an
+     * authoritative, independent vector; note the key "Jefe" is not 32 bytes,
+     * which is exactly why the multipart init form is used). */
+    CHECK(sxt_hmac_sha256_bytes() == 32, "HMAC-SHA256 output width is 32");
+    CHECK(sxt_hmac_sha256(mac, 32, (const unsigned char *)"Jefe", 4,
+                          (const unsigned char *)"what do ya want for nothing?", 28) == 32,
+          "HMAC-SHA256 writes 32 bytes");
+    sxt_bin2hex(hex, (int)sizeof hex, mac, 32);
+    CHECK(strcmp(hex,
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843") == 0,
+          "HMAC-SHA256 matches RFC 4231 Test Case 2");
+    /* an empty key and message are legal (no crash); a short buffer -> -needed. */
+    CHECK(sxt_hmac_sha256(mac, 32, (const unsigned char *)"", 0,
+                          (const unsigned char *)"", 0) == 32,
+          "HMAC-SHA256 with an empty key and message is fine");
+    CHECK(sxt_hmac_sha256(mac, 8, (const unsigned char *)"k", 1,
+                          (const unsigned char *)"m", 1) == -32,
+          "HMAC-SHA256 short buffer -> -needed (32)");
+}
+
 static void test_pad(void)
 {
     unsigned char buf[32];
@@ -1037,6 +1091,7 @@ int main(void)
     test_kdf();
     test_kx();
     test_seeded_keypairs();
+    test_onion_primitives();
     test_pad();
     test_phase6();
 

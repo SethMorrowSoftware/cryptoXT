@@ -43,6 +43,7 @@ function sxSelfTest
    testSeal
    testKeyExchange
    testSeededKeypairs
+   testOnionPrimitives
    testPadding
    testHashExtras
 
@@ -409,6 +410,30 @@ on testSeededKeypairs
    sxKeyExchangeServer tRpk, tRsk, tKpk, tSrx, tStx
    sxCheck (sxMemEqual(tCrx, tStx) is true), "a seeded kx keypair agrees a session key"
 end testSeededKeypairs
+
+on testOnionPrimitives
+   local tSeed
+   local tExpanded
+   local tExpanded2
+   local tMac
+   sxSection "onion-support primitives (ed25519 expanded key + HMAC-SHA256)"
+   -- 0x42 x 32, the same seed the native known-answer test uses (B is 0x42).
+   put textEncode("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", "ascii") into tSeed
+   -- seed -> the 64-byte expanded ed25519 key (SHA-512(seed), clamped): the form
+   -- a Tor v3 onion service consumes, so one seed fixes a reproducible address.
+   put sxSignSeedToExpandedKey(tSeed) into tExpanded
+   sxCheck (the number of bytes in tExpanded is 64), "expanded ed25519 key is 64 bytes"
+   sxCheck (sxHexOf(tExpanded) is \
+      "90e7595fc89e52fdfddce9c6a43d74dbf6047025ee0462d2d172e8b6a2841d6eeda66ce2983f7ff7e47c49615220e78c25c775a040957316b7bafd5985450f90"), \
+      "seed -> expanded key matches the known-answer vector"
+   put sxSignSeedToExpandedKey(tSeed) into tExpanded2
+   sxCheck (sxMemEqual(tExpanded, tExpanded2) is true), "seed -> expanded key is deterministic"
+   -- HMAC-SHA256 over an arbitrary-length key: RFC 4231 Test Case 2.
+   put sxHmacSha256(textEncode("Jefe", "ascii"), textEncode("what do ya want for nothing?", "ascii")) into tMac
+   sxCheck (sxHexOf(tMac) is \
+      "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"), \
+      "HMAC-SHA256 matches RFC 4231 Test Case 2"
+end testOnionPrimitives
 
 on testPadding
    local tPadded
